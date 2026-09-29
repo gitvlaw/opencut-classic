@@ -24,6 +24,15 @@ thread_local! {
     static COMPOSITOR_RUNTIME: RefCell<Option<CompositorRuntime>> = const { RefCell::new(None) };
 }
 
+pub(crate) fn with_compositor_mut<T>(action: impl FnOnce(&mut Compositor) -> T) -> Option<T> {
+    COMPOSITOR_RUNTIME.with(|runtime| {
+        runtime
+            .borrow_mut()
+            .as_mut()
+            .map(|runtime| action(&mut runtime.compositor))
+    })
+}
+
 #[wasm_bindgen(js_name = initCompositor)]
 pub fn init_compositor(width: u32, height: u32) -> Result<(), JsValue> {
     with_gpu_runtime(|gpu_runtime| {

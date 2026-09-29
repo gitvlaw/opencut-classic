@@ -125,7 +125,9 @@ function buildTrackNodes({
 					nodes.push(
 						new EffectLayerNode({
 							effectType: element.effectType,
+							effectId: element.id,
 							effectParams: element.params,
+							animations: element.animations,
 							timeOffset: element.startTime,
 							duration: element.duration,
 						}),
@@ -273,7 +275,9 @@ function buildTrackNodes({
 				nodes.push(
 					new EffectLayerNode({
 						effectType: element.effectType,
+						effectId: element.id,
 						effectParams: element.params,
+						animations: element.animations,
 						timeOffset: element.startTime,
 						duration: element.duration,
 					}),

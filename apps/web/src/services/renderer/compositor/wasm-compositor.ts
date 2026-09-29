@@ -12,6 +12,7 @@ import {
 	isRenderPerfEnabled,
 	recordWasmFrameProfile,
 } from "@/diagnostics/render-perf";
+import { syncLutTexturesToGpu } from "@/lut/lut-registry";
 import type {
 	ExternalTextureDescriptor,
 	FrameDescriptor,
@@ -49,6 +50,9 @@ class WasmCompositor {
 			initCompositor(width, height);
 			this.canvas = getCompositorCanvas();
 			this.initializedSize = { width, height };
+			// A fresh compositor owns a fresh effect pipeline with an empty
+			// LUT map — replay session LUTs so lut-3d passes keep working.
+			syncLutTexturesToGpu();
 			return;
 		}
 

@@ -4,6 +4,7 @@ import { blurEffectDefinition } from "./blur";
 import { curvesEffectDefinition } from "./curves";
 import { filterEffectDefinition } from "./filter";
 import { hslEffectDefinition } from "./hsl";
+import { lutEffectDefinition } from "./lut";
 
 const defaultEffects = [
 	blurEffectDefinition,
@@ -11,6 +12,7 @@ const defaultEffects = [
 	hslEffectDefinition,
 	curvesEffectDefinition,
 	filterEffectDefinition,
+	lutEffectDefinition,
 ];
 
 export function registerDefaultEffects(): void {

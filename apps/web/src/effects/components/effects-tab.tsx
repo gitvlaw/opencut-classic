@@ -1,12 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import type { ParamValues } from "@/params";
+import { buildEffectParamPath, resolveAnimationPathValueAtTime } from "@/animation";
+import type { ElementAnimations } from "@/animation/types";
+import type { ParamDefinition, ParamValues, ParamValue } from "@/params";
 import type { Effect } from "@/effects/types";
-import type { EffectElement, VisualElement } from "@/timeline";
+import type { EffectElement, VisualElement, TimelineElement } from "@/timeline";
+import type { MediaTime } from "@/wasm";
 import { effectsRegistry } from "@/effects";
 import { useEditor } from "@/editor/use-editor";
 import { useElementPreview } from "@/timeline/hooks/use-element-preview";
+import { useElementPlayhead } from "@/components/editor/panels/properties/hooks/use-element-playhead";
+import { useKeyframedParamProperty } from "@/components/editor/panels/properties/hooks/use-keyframed-param-property";
 import {
 	Section,
 	SectionContent,
@@ -27,6 +32,16 @@ import { cn } from "@/utils/ui";
 import { Separator } from "@/components/ui/separator";
 import { useAssetsPanelStore } from "@/components/editor/panels/assets/assets-panel-store";
 import { EffectHistogram } from "@/effects/components/scopes";
+import { CurveEditor } from "@/effects/components/curve-editor";
+import { LutPicker } from "@/effects/components/lut-panel";
+import {
+	CURVE_CHANNELS,
+	curvePreset,
+	encodeCurve,
+	parseCurvePoints,
+	type CurveChannel,
+} from "@/effects/definitions/curves";
+import type { LutEntry } from "@/lut/lut-registry";
 
 export function StandaloneEffectTab({
 	element,
@@ -54,6 +69,17 @@ export function StandaloneEffectTab({
 		});
 	};
 
+	const previewEffectParams = (patch: ParamValues) => {
+		previewUpdates({
+			params: { ...(renderElement as EffectElement).params, ...patch },
+		});
+	};
+
+	const { localTime, isPlayheadWithinElementRange } = useElementPlayhead({
+		startTime: element.startTime,
+		duration: element.duration,
+	});
+
 	return (
 		<div className="flex flex-col h-full">
 			<div className="border-b px-3.5 h-11 shrink-0 flex items-center">
@@ -61,8 +87,17 @@ export function StandaloneEffectTab({
 			</div>
 			<EffectSection
 				effect={effect}
+				trackId={trackId}
+				elementId={element.id}
+				animations={(renderElement as EffectElement).animations}
+				localTime={localTime}
+				isPlayheadWithinElementRange={isPlayheadWithinElementRange}
 				renderParams={(renderElement as EffectElement).params}
 				previewParam={previewParam}
+				previewEffectParams={previewEffectParams}
+				patchEffectParam={(_effectId, key, value) => ({
+					params: { ...(renderElement as EffectElement).params, [key]: value },
+				})}
 				onCommit={commit}
 			/>
 		</div>
@@ -84,8 +119,14 @@ export function ClipEffectsTab({
 		elementId: element.id,
 		fallback: element,
 	});
+	const { localTime, isPlayheadWithinElementRange } = useElementPlayhead({
+		startTime: element.startTime,
+		duration: element.duration,
+	});
 
 	const effects: Effect[] = element.effects ?? [];
+	const renderEffects: Effect[] =
+		(renderElement as VisualElement).effects ?? effects;
 
 	const getRenderParams = ({ effectId }: { effectId: string }): ParamValues => {
 		return (
@@ -100,12 +141,15 @@ export function ClipEffectsTab({
 		(effectId: string) =>
 		(key: string) =>
 		(value: number | string | boolean) => {
-			const updatedEffects = (
-				(renderElement as VisualElement).effects ?? []
-			).map((existing) =>
+			buildPreviewEffectParams(effectId)({ [key]: value });
+		};
+
+	const buildPreviewEffectParams =
+		(effectId: string) => (patch: ParamValues) => {
+			const updatedEffects = renderEffects.map((existing) =>
 				existing.id !== effectId
 					? existing
-					: { ...existing, params: { ...existing.params, [key]: value } },
+					: { ...existing, params: { ...existing.params, ...patch } },
 			);
 			previewUpdates({ effects: updatedEffects });
 		};
@@ -190,8 +234,24 @@ export function ClipEffectsTab({
 							>
 								<EffectSection
 									effect={effect}
+									trackId={trackId}
+									elementId={element.id}
+									animations={(renderElement as VisualElement).animations}
+									localTime={localTime}
+									isPlayheadWithinElementRange={isPlayheadWithinElementRange}
 									renderParams={getRenderParams({ effectId: effect.id })}
 									previewParam={buildPreviewParam(effect.id)}
+									previewEffectParams={buildPreviewEffectParams(effect.id)}
+									patchEffectParam={(_effectId, key, value) => ({
+										effects: renderEffects.map((existing) =>
+											existing.id !== effect.id
+												? existing
+												: {
+														...existing,
+														params: { ...existing.params, [key]: value },
+													},
+										),
+									})}
 									onCommit={commit}
 									onToggle={() =>
 										editor.timeline.toggleClipEffect({
@@ -220,6 +280,7 @@ export function ClipEffectsTab({
 const COLOR_QUICK_ADD: Array<{ type: string; label: string }> = [
 	{ type: "adjust", label: "Adjust" },
 	{ type: "filter", label: "Filter" },
+	{ type: "lut", label: "LUT" },
 	{ type: "hsl", label: "HSL" },
 	{ type: "curves", label: "Curves" },
 ];
@@ -299,15 +360,33 @@ function EmptyView({ elementId, trackId }: { elementId: string; trackId: string 
 
 function EffectSection({
 	effect,
+	trackId,
+	elementId,
+	animations,
+	localTime,
+	isPlayheadWithinElementRange,
 	renderParams,
 	previewParam,
+	previewEffectParams,
+	patchEffectParam,
 	onCommit,
 	onToggle,
 	onRemove,
 }: {
 	effect: Effect;
+	trackId: string;
+	elementId: string;
+	animations: ElementAnimations | undefined;
+	localTime: MediaTime;
+	isPlayheadWithinElementRange: boolean;
 	renderParams: ParamValues;
 	previewParam: (key: string) => (value: number | string | boolean) => void;
+	previewEffectParams: (patch: ParamValues) => void;
+	patchEffectParam: (
+		effectId: string,
+		key: string,
+		value: ParamValue,
+	) => Partial<TimelineElement>;
 	onCommit: () => void;
 	onToggle?: () => void;
 	onRemove?: () => void;
@@ -384,22 +463,281 @@ function EffectSection({
 						<Separator />
 					</div>
 				)}
-				<SectionFields>
-					{definition.params.map((param) => (
-						<div key={param.key} className="flex flex-col gap-3.5">
-							<div className="px-4">
-								<PropertyParamField
-									param={param}
-									value={renderParams[param.key] ?? param.default}
-									onPreview={previewParam(param.key)}
-									onCommit={onCommit}
-								/>
+				{effect.type === "curves" ? (
+					<CurvesPanel
+						renderParams={renderParams}
+						previewEffectParams={previewEffectParams}
+						onCommit={onCommit}
+					/>
+				) : effect.type === "lut" ? (
+					<LutPanel
+						effect={effect}
+						trackId={trackId}
+						elementId={elementId}
+						animations={animations}
+						localTime={localTime}
+						isPlayheadWithinElementRange={isPlayheadWithinElementRange}
+						renderParams={renderParams}
+						previewEffectParams={previewEffectParams}
+						patchEffectParam={patchEffectParam}
+						onCommit={onCommit}
+					/>
+				) : (
+					<SectionFields>
+						{definition.params.map((param) => (
+							<div key={param.key} className="flex flex-col gap-3.5">
+								<div className="px-4">
+									<EffectParamField
+										effect={effect}
+										trackId={trackId}
+										elementId={elementId}
+										animations={animations}
+										localTime={localTime}
+										isPlayheadWithinElementRange={isPlayheadWithinElementRange}
+										param={param}
+										baseValue={
+											(renderParams[param.key] ?? param.default) as ParamValue
+										}
+										previewParam={previewParam}
+										patchEffectParam={patchEffectParam}
+										onCommit={onCommit}
+									/>
+								</div>
+								<Separator />
 							</div>
-							<Separator />
-						</div>
-					))}
-				</SectionFields>
+						))}
+					</SectionFields>
+				)}
 			</SectionContent>
 		</Section>
+	);
+}
+
+/**
+ * One effect param row with keyframe support. Number params route through
+ * the animation channel (effects.<id>.params.<key>) when keyframed —
+ * same behavior as element params in ElementParamsTab.
+ */
+function EffectParamField({
+	effect,
+	trackId,
+	elementId,
+	animations,
+	localTime,
+	isPlayheadWithinElementRange,
+	param,
+	baseValue,
+	previewParam,
+	patchEffectParam,
+	onCommit,
+}: {
+	effect: Effect;
+	trackId: string;
+	elementId: string;
+	animations: ElementAnimations | undefined;
+	localTime: MediaTime;
+	isPlayheadWithinElementRange: boolean;
+	param: ParamDefinition;
+	baseValue: ParamValue;
+	previewParam: (key: string) => (value: number | string | boolean) => void;
+	patchEffectParam: (
+		effectId: string,
+		key: string,
+		value: ParamValue,
+	) => Partial<TimelineElement>;
+	onCommit: () => void;
+}) {
+	const propertyPath = buildEffectParamPath({ effectId: effect.id, paramKey: param.key });
+	const resolvedValue = resolveAnimationPathValueAtTime({
+		animations,
+		propertyPath,
+		localTime,
+		fallbackValue: baseValue,
+	});
+	const animated = useKeyframedParamProperty({
+		param,
+		trackId,
+		elementId,
+		animations,
+		propertyPath,
+		localTime,
+		isPlayheadWithinElementRange,
+		resolvedValue,
+		buildBaseUpdates: ({ value }) => patchEffectParam(effect.id, param.key, value),
+	});
+
+	if (param.type !== "number" || param.keyframable === false) {
+		return (
+			<PropertyParamField
+				param={param}
+				value={resolvedValue}
+				onPreview={previewParam(param.key)}
+				onCommit={onCommit}
+			/>
+		);
+	}
+
+	return (
+		<PropertyParamField
+			param={param}
+			value={resolvedValue}
+			onPreview={animated.onPreview}
+			onCommit={animated.onCommit}
+			keyframe={{
+				isActive: animated.isKeyframedAtTime,
+				isDisabled: !isPlayheadWithinElementRange,
+				onToggle: animated.toggleKeyframe,
+			}}
+		/>
+	);
+}
+
+/** Curves effect: drag editor + preset select (preset writes channel JSON). */
+function CurvesPanel({
+	renderParams,
+	previewEffectParams,
+	onCommit,
+}: {
+	renderParams: ParamValues;
+	previewEffectParams: (patch: ParamValues) => void;
+	onCommit: () => void;
+}) {
+	const definition = effectsRegistry.get("curves");
+	const presetParam = definition.params.find((p) => p.key === "preset")!;
+	const channels = {
+		master: parseCurvePoints(renderParams, "master"),
+		red: parseCurvePoints(renderParams, "red"),
+		green: parseCurvePoints(renderParams, "green"),
+		blue: parseCurvePoints(renderParams, "blue"),
+	} satisfies Record<CurveChannel, number[]>;
+
+	return (
+		<SectionFields>
+			<div className="flex flex-col gap-3.5">
+				<CurveEditor
+					channels={channels}
+					onPreview={(channel, points) =>
+						previewEffectParams({
+							[`curves.${channel}`]: encodeCurve(points),
+							preset: "custom",
+						})
+					}
+					onCommit={onCommit}
+				/>
+				<Separator />
+			</div>
+			<div className="flex flex-col gap-3.5">
+				<div className="px-4">
+					<PropertyParamField
+						param={presetParam}
+						value={renderParams.preset ?? "custom"}
+						onPreview={(value) => {
+							const name = String(value);
+							if (name === "custom") {
+								previewEffectParams({ preset: name });
+								return;
+							}
+							const p = curvePreset(name);
+							previewEffectParams({
+								preset: name,
+								"curves.master": encodeCurve(p.master),
+								"curves.red": encodeCurve(p.red),
+								"curves.green": encodeCurve(p.green),
+								"curves.blue": encodeCurve(p.blue),
+							});
+						}}
+						onCommit={onCommit}
+					/>
+				</div>
+				<Separator />
+			</div>
+		</SectionFields>
+	);
+}
+
+/** LUT effect: file import + session list + keyframable intensity. */
+function LutPanel({
+	effect,
+	trackId,
+	elementId,
+	animations,
+	localTime,
+	isPlayheadWithinElementRange,
+	renderParams,
+	previewEffectParams,
+	patchEffectParam,
+	onCommit,
+}: {
+	effect: Effect;
+	trackId: string;
+	elementId: string;
+	animations: ElementAnimations | undefined;
+	localTime: MediaTime;
+	isPlayheadWithinElementRange: boolean;
+	renderParams: ParamValues;
+	previewEffectParams: (patch: ParamValues) => void;
+	patchEffectParam: (
+		effectId: string,
+		key: string,
+		value: ParamValue,
+	) => Partial<TimelineElement>;
+	onCommit: () => void;
+}) {
+	const definition = effectsRegistry.get("lut");
+	const intensityParam = definition.params.find((p) => p.key === "intensity")!;
+	const baseIntensity =
+		typeof renderParams.intensity === "number" ? renderParams.intensity : 100;
+	const propertyPath = buildEffectParamPath({ effectId: effect.id, paramKey: "intensity" });
+	const resolvedIntensity = resolveAnimationPathValueAtTime({
+		animations,
+		propertyPath,
+		localTime,
+		fallbackValue: baseIntensity,
+	});
+	const animatedIntensity = useKeyframedParamProperty({
+		param: intensityParam,
+		trackId,
+		elementId,
+		animations,
+		propertyPath,
+		localTime,
+		isPlayheadWithinElementRange,
+		resolvedValue: resolvedIntensity,
+		buildBaseUpdates: ({ value }) => patchEffectParam(effect.id, "intensity", value),
+	});
+
+	return (
+		<SectionFields>
+			<div className="flex flex-col gap-3.5">
+				<LutPicker
+					lutKey={String(renderParams.lutKey ?? "none")}
+					onPick={(entry: LutEntry | null) => {
+						previewEffectParams(
+							entry
+								? { lutKey: entry.key, lutName: entry.name }
+								: { lutKey: "none", lutName: "None" },
+						);
+						onCommit();
+					}}
+				/>
+				<Separator />
+			</div>
+			<div className="flex flex-col gap-3.5">
+				<div className="px-4">
+					<PropertyParamField
+						param={intensityParam}
+						value={resolvedIntensity}
+						onPreview={animatedIntensity.onPreview}
+						onCommit={animatedIntensity.onCommit}
+						keyframe={{
+							isActive: animatedIntensity.isKeyframedAtTime,
+							isDisabled: !isPlayheadWithinElementRange,
+							onToggle: animatedIntensity.toggleKeyframe,
+						}}
+					/>
+				</div>
+				<Separator />
+			</div>
+		</SectionFields>
 	);
 }

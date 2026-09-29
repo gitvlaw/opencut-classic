@@ -12,12 +12,29 @@ pub const COLOR_GRADE_SHADER_ID: &str = "color-grade";
 pub const HSL_SHIFT_SHADER_ID: &str = "hsl-shift";
 pub const CURVES_SHADER_ID: &str = "curves";
 pub const COLOR_FILTER_SHADER_ID: &str = "color-filter";
+pub const LUT_3D_SHADER_ID: &str = "lut-3d";
+pub const COLOR_GRADE_HSL_SHADER_ID: &str = "color-grade-hsl";
 
 const GAUSSIAN_BLUR_SHADER_SOURCE: &str = include_str!("shaders/gaussian_blur.wgsl");
 const COLOR_GRADE_SHADER_SOURCE: &str = include_str!("shaders/color_grade.wgsl");
 const HSL_SHIFT_SHADER_SOURCE: &str = include_str!("shaders/hsl_shift.wgsl");
 const CURVES_SHADER_SOURCE: &str = include_str!("shaders/curves.wgsl");
 const COLOR_FILTER_SHADER_SOURCE: &str = include_str!("shaders/color_filter.wgsl");
+const LUT_3D_SHADER_SOURCE: &str = include_str!("shaders/lut_3d.wgsl");
+const COLOR_GRADE_HSL_SHADER_SOURCE: &str = include_str!("shaders/color_grade_hsl.wgsl");
+
+/// All shader ids supported by this pipeline version.
+/// Exposed to TS via `listEffectShaders` so the UI can drop passes the
+/// deployed wasm bundle does not understand yet.
+pub const SHADER_IDS: &[&str] = &[
+    GAUSSIAN_BLUR_SHADER_ID,
+    COLOR_GRADE_SHADER_ID,
+    HSL_SHIFT_SHADER_ID,
+    CURVES_SHADER_ID,
+    COLOR_FILTER_SHADER_ID,
+    LUT_3D_SHADER_ID,
+    COLOR_GRADE_HSL_SHADER_ID,
+];
 
 /// Number of generic data floats shared by all color shaders.
 /// Header (resolution + direction) stays for blur backward-compat.
@@ -33,6 +50,13 @@ pub struct ApplyEffectsOptions<'a> {
 pub struct EffectPipeline {
     uniform_bind_group_layout: wgpu::BindGroupLayout,
     pipelines: HashMap<String, wgpu::RenderPipeline>,
+    lut_pipelines: HashMap<String, wgpu::RenderPipeline>,
+    lut_textures: HashMap<u32, LutTexture>,
+}
+
+struct LutTexture {
+    texture: wgpu::Texture,
+    size: u32,
 }
 
 #[derive(Debug, Error)]
@@ -114,60 +138,63 @@ impl EffectPipeline {
             (HSL_SHIFT_SHADER_ID, HSL_SHIFT_SHADER_SOURCE),
             (CURVES_SHADER_ID, CURVES_SHADER_SOURCE),
             (COLOR_FILTER_SHADER_ID, COLOR_FILTER_SHADER_SOURCE),
+            (COLOR_GRADE_HSL_SHADER_ID, COLOR_GRADE_HSL_SHADER_SOURCE),
         ];
 
-        let mut pipelines = HashMap::with_capacity(shaders.len());
+        let mut pipelines = HashMap::with_capacity(shaders.len() + 1);
         for (id, source) in shaders {
-            let module =
-                context
-                    .device()
-                    .create_shader_module(wgpu::ShaderModuleDescriptor {
-                        label: Some(&format!("effects-{id}-shader")),
-                        source: wgpu::ShaderSource::Wgsl((*source).into()),
-                    });
-            let pipeline =
-                context
-                    .device()
-                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: Some(&format!("effects-{id}-pipeline")),
-                        layout: Some(&pipeline_layout),
-                        vertex: wgpu::VertexState {
-                            module: &vertex_shader_module,
-                            entry_point: Some("vertex_main"),
-                            buffers: &[wgpu::VertexBufferLayout {
-                                array_stride: std::mem::size_of::<[f32; 2]>() as u64,
-                                step_mode: wgpu::VertexStepMode::Vertex,
-                                attributes: &[wgpu::VertexAttribute {
-                                    format: wgpu::VertexFormat::Float32x2,
-                                    offset: 0,
-                                    shader_location: 0,
-                                }],
-                            }],
-                            compilation_options: wgpu::PipelineCompilationOptions::default(),
-                        },
-                        fragment: Some(wgpu::FragmentState {
-                            module: &module,
-                            entry_point: Some("fragment_main"),
-                            targets: &[Some(wgpu::ColorTargetState {
-                                format: context.texture_format(),
-                                blend: None,
-                                write_mask: wgpu::ColorWrites::ALL,
-                            })],
-                            compilation_options: wgpu::PipelineCompilationOptions::default(),
-                        }),
-                        primitive: wgpu::PrimitiveState::default(),
-                        depth_stencil: None,
-                        multisample: wgpu::MultisampleState::default(),
-                        multiview_mask: None,
-                        cache: None,
-                    });
-            pipelines.insert(id.to_string(), pipeline);
+            pipelines.insert(
+                id.to_string(),
+                build_fullscreen_pipeline(
+                    context,
+                    &vertex_shader_module,
+                    &pipeline_layout,
+                    id,
+                    source,
+                ),
+            );
         }
+
+        // LUT passes need a third bind group (the LUT strip texture).
+        let lut_pipeline_layout =
+            context
+                .device()
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("effects-lut-pipeline-layout"),
+                    bind_group_layouts: &[
+                        Some(context.texture_sampler_bind_group_layout()),
+                        Some(&uniform_bind_group_layout),
+                        Some(context.texture_sampler_bind_group_layout()),
+                    ],
+                    immediate_size: 0,
+                });
+        let lut_pipelines = HashMap::from([(
+            LUT_3D_SHADER_ID.to_string(),
+            build_fullscreen_pipeline(
+                context,
+                &vertex_shader_module,
+                &lut_pipeline_layout,
+                LUT_3D_SHADER_ID,
+                LUT_3D_SHADER_SOURCE,
+            ),
+        )]);
 
         Self {
             uniform_bind_group_layout,
             pipelines,
+            lut_pipelines,
+            lut_textures: HashMap::new(),
         }
+    }
+
+    /// Register a Hald-strip LUT texture (built by TS `lut/hald.ts`).
+    /// Re-registration with the same id replaces the previous texture.
+    pub fn register_lut(&mut self, id: u32, texture: wgpu::Texture, size: u32) {
+        self.lut_textures.insert(id, LutTexture { texture, size });
+    }
+
+    pub fn unregister_lut(&mut self, id: u32) {
+        self.lut_textures.remove(&id);
     }
 
     pub fn apply(
@@ -255,6 +282,21 @@ impl EffectPipeline {
                             resource: uniform_buffer.as_entire_binding(),
                         }],
                     });
+            if pass.shader == LUT_3D_SHADER_ID {
+                // LUT passes use a dedicated 3-bind-group pipeline; the
+                // uniform buffer above is still required by the shader.
+                self.apply_lut_pass(
+                    context,
+                    &mut *encoder,
+                    input_texture,
+                    &output_view,
+                    pass,
+                    &texture_bind_group,
+                    &uniform_bind_group,
+                )?;
+                current_texture = Some(output_texture);
+                continue;
+            }
             let pipeline = self.pipelines.get(&pass.shader).ok_or_else(|| {
                 EffectsError::UnknownEffectShader {
                     shader: pass.shader.clone(),
@@ -290,6 +332,125 @@ impl EffectPipeline {
 
         current_texture.ok_or(EffectsError::MissingEffectPasses)
     }
+
+    /// Render a `lut-3d` pass. A missing LUT texture is a silent no-op blit —
+    /// a stale/evicted LUT id must never break the frame.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_lut_pass(
+        &self,
+        context: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        input_texture: &wgpu::Texture,
+        output_view: &wgpu::TextureView,
+        pass: &EffectPass,
+        texture_bind_group: &wgpu::BindGroup,
+        uniform_bind_group: &wgpu::BindGroup,
+    ) -> Result<(), EffectsError> {
+        let data = read_data_uniform(pass)?;
+        let lut_id = data.get(2).copied().unwrap_or(0.0) as u32;
+        let Some(lut) = self.lut_textures.get(&lut_id) else {
+            context.encode_texture_blit_to_view(
+                encoder,
+                input_texture,
+                output_view,
+                "effects-lut-missing-blit",
+            );
+            return Ok(());
+        };
+        let pipeline =
+            self.lut_pipelines
+                .get(LUT_3D_SHADER_ID)
+                .ok_or_else(|| EffectsError::UnknownEffectShader {
+                    shader: LUT_3D_SHADER_ID.to_string(),
+                })?;
+        let lut_view = lut.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let lut_bind_group =
+            context
+                .device()
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("effects-lut-texture-bind-group"),
+                    layout: context.texture_sampler_bind_group_layout(),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&lut_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(context.linear_sampler()),
+                        },
+                    ],
+                });
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("effects-lut-render-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            multiview_mask: None,
+        });
+        render_pass.set_pipeline(pipeline);
+        render_pass.set_vertex_buffer(0, context.fullscreen_quad().slice(..));
+        render_pass.set_bind_group(0, texture_bind_group, &[]);
+        render_pass.set_bind_group(1, uniform_bind_group, &[]);
+        render_pass.set_bind_group(2, &lut_bind_group, &[]);
+        render_pass.draw(0..6, 0..1);
+        Ok(())
+    }
+}
+
+fn build_fullscreen_pipeline(
+    context: &GpuContext,
+    vertex_shader_module: &wgpu::ShaderModule,
+    pipeline_layout: &wgpu::PipelineLayout,
+    id: &str,
+    source: &str,
+) -> wgpu::RenderPipeline {
+    let module = context.device().create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(&format!("effects-{id}-shader")),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    context.device().create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(&format!("effects-{id}-pipeline")),
+        layout: Some(pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: vertex_shader_module,
+            entry_point: Some("vertex_main"),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<[f32; 2]>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 0,
+                    shader_location: 0,
+                }],
+            }],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fragment_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: context.texture_format(),
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 fn pack_effect_uniforms(
@@ -299,9 +460,12 @@ fn pack_effect_uniforms(
 ) -> Result<EffectUniformBuffer, EffectsError> {
     match pass.shader.as_str() {
         GAUSSIAN_BLUR_SHADER_ID => pack_blur_uniforms(pass, width, height),
-        COLOR_GRADE_SHADER_ID | HSL_SHIFT_SHADER_ID | CURVES_SHADER_ID | COLOR_FILTER_SHADER_ID => {
-            pack_data_uniforms(pass, width, height)
-        }
+        COLOR_GRADE_SHADER_ID
+        | HSL_SHIFT_SHADER_ID
+        | CURVES_SHADER_ID
+        | COLOR_FILTER_SHADER_ID
+        | LUT_3D_SHADER_ID
+        | COLOR_GRADE_HSL_SHADER_ID => pack_data_uniforms(pass, width, height),
         _ => Err(EffectsError::UnknownEffectShader {
             shader: pass.shader.clone(),
         }),

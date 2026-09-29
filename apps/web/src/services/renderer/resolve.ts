@@ -6,6 +6,8 @@ import {
 	intensityToSigma,
 } from "@/effects/definitions/blur";
 import { effectsRegistry, resolveEffectPasses } from "@/effects";
+import { compactAndFilterGroups } from "@/effects/capabilities";
+import { fuseGradeHslGroups } from "@/effects/fuse";
 import type { Effect, EffectPass } from "@/effects/types";
 import { getSourceTimeAtClipTime } from "@/retime";
 import {
@@ -117,8 +119,8 @@ function resolveEffectPassGroups({
 	width: number;
 	height: number;
 }): EffectPass[][] {
-	return (effects ?? [])
-		.filter((effect) => effect.enabled)
+  const groups = (effects ?? [])
+		.filter((effect) => effect.enabled && effectsRegistry.has(effect.type))
 		.map((effect) => {
 			const resolvedParams = resolveEffectParamsAtTime({
 				effectId: effect.id,
@@ -134,6 +136,10 @@ function resolveEffectPassGroups({
 				height,
 			});
 		});
+	// Adjacent Adjust→HSL pairs render in one fused pass; empty groups
+	// (identity params) and passes unknown to the deployed wasm bundle
+	// are dropped so they can never break the frame.
+	return compactAndFilterGroups(fuseGradeHslGroups(groups));
 }
 
 function resolveVisualState({
@@ -590,13 +596,28 @@ function resolveEffectLayerNode({
 		return null;
 	}
 
+	if (!effectsRegistry.has(node.params.effectType)) {
+		return null;
+	}
 	const definition = effectsRegistry.get(node.params.effectType);
-	const passes = resolveEffectPasses({
-		definition,
-		effectParams: node.params.effectParams,
-		width: context.renderer.width,
-		height: context.renderer.height,
+	const localTime = getElementLocalTime({
+		timelineTime: time,
+		elementStartTime: node.params.timeOffset,
+		elementDuration: node.params.duration,
 	});
+	const passes = compactAndFilterGroups([
+		resolveEffectPasses({
+			definition,
+			effectParams: resolveEffectParamsAtTime({
+				effectId: node.params.effectId,
+				params: node.params.effectParams,
+				animations: node.params.animations,
+				localTime,
+			}),
+			width: context.renderer.width,
+			height: context.renderer.height,
+		}),
+	]).flat();
 	if (passes.length === 0) {
 		return null;
 	}

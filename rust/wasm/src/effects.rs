@@ -6,9 +6,10 @@ use js_sys::Object;
 use serde::Deserialize;
 use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
 
+use crate::compositor::with_compositor_mut;
 use crate::gpu::{
     import_canvas_texture, read_offscreen_canvas_property, read_serde_property, read_u32_property,
-    render_texture_to_canvas, with_gpu_runtime,
+    render_texture_to_canvas, with_gpu_runtime, with_gpu_runtime_mut,
 };
 
 struct ApplyEffectPassesOptions {
@@ -97,5 +98,50 @@ fn parse_apply_effect_passes_options(value: JsValue) -> Result<ApplyEffectPasses
         width: read_u32_property(&object, "width")?,
         height: read_u32_property(&object, "height")?,
         passes: read_serde_property(&object, "passes")?,
+    })
+}
+
+/// Shader ids supported by the deployed bundle. TS drops passes it does
+/// not understand so an older bundle never breaks the frame.
+#[wasm_bindgen(js_name = listEffectShaders)]
+pub fn list_effect_shaders() -> Vec<js_sys::JsString> {
+    effects::SHADER_IDS
+        .iter()
+        .map(|id| js_sys::JsString::from(*id))
+        .collect()
+}
+
+/// Upload a Hald-strip LUT canvas (built by TS `lut/hald.ts`) into both the
+/// preview pipeline and the compositor pipeline (when initialized).
+#[wasm_bindgen(js_name = registerLutTexture)]
+pub fn register_lut_texture(options: JsValue) -> Result<(), JsValue> {
+    let object: Object = options
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("registerLutTexture expects an options object"))?;
+    let id = read_u32_property(&object, "id")?;
+    let source = read_offscreen_canvas_property(&object, "source")?;
+    let width = read_u32_property(&object, "width")?;
+    let height = read_u32_property(&object, "height")?;
+    let size = read_u32_property(&object, "size")?;
+
+    with_gpu_runtime_mut(|runtime| {
+        let texture =
+            import_canvas_texture(&runtime.context, &source, width, height, "lut-texture");
+        runtime.effects.register_lut(id, texture.clone(), size);
+        with_compositor_mut(|compositor| {
+            compositor.register_lut_texture(id, texture, size);
+        });
+        Ok(())
+    })
+}
+
+#[wasm_bindgen(js_name = unregisterLutTexture)]
+pub fn unregister_lut_texture(id: u32) -> Result<(), JsValue> {
+    with_gpu_runtime_mut(|runtime| {
+        runtime.effects.unregister_lut(id);
+        with_compositor_mut(|compositor| {
+            compositor.unregister_lut_texture(id);
+        });
+        Ok(())
     })
 }

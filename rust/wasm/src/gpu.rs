@@ -76,6 +76,20 @@ pub(crate) fn with_gpu_runtime<T>(
     })
 }
 
+pub(crate) fn with_gpu_runtime_mut<T>(
+    action: impl FnOnce(&mut GpuRuntime) -> Result<T, JsValue>,
+) -> Result<T, JsValue> {
+    GPU_RUNTIME.with(|runtime| {
+        let mut borrow = runtime.borrow_mut();
+        let Some(gpu_runtime) = borrow.as_mut() else {
+            return Err(JsValue::from_str(
+                "GPU context not initialized. Call initializeGpu() first.",
+            ));
+        };
+        action(gpu_runtime)
+    })
+}
+
 pub(crate) fn import_canvas_texture(
     context: &GpuContext,
     canvas: &wgpu::web_sys::OffscreenCanvas,

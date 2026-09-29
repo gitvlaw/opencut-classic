@@ -17,8 +17,15 @@ export function identityCurve(): number[] {
  * number|string|boolean). The dedicated curve editor tab reads/writes
  * these keys; keyframing is discrete (hold) per channel.
  */
-function parseCurve(params: ParamValues, channel: CurveChannel): number[] {
-	const raw = params[`curves.${channel}`];
+/**
+ * Read one channel's 16 control values from effect params (JSON text).
+ * Exported for the curve editor UI.
+ */
+export function parseCurvePoints(params: ParamValues, channel: CurveChannel): number[] {
+	return parseCurve(params, channel);
+}
+
+function parseCurve(params: ParamValues, channel: CurveChannel): number[] {	const raw = params[`curves.${channel}`];
 	if (typeof raw === "string") {
 		try {
 			const arr = JSON.parse(raw) as unknown;

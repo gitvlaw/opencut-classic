@@ -288,6 +288,14 @@ impl Compositor {
         self.textures.remove(id);
     }
 
+    pub fn register_lut_texture(&mut self, id: u32, texture: wgpu::Texture, size: u32) {
+        self.effects.register_lut(id, texture, size);
+    }
+
+    pub fn unregister_lut_texture(&mut self, id: u32) {
+        self.effects.unregister_lut(id);
+    }
+
     /// Composites all frame items into a texture and returns it.
     /// Used on backends that cannot surface-render to an arbitrary canvas (e.g. WebGL).
     pub fn render_frame_to_texture(
@@ -493,6 +501,11 @@ impl Compositor {
     ) -> Result<wgpu::Texture, CompositorError> {
         let mut current = self.copy_texture(context, encoder, source, width, height);
         for group in effect_pass_groups {
+            // Identity effects resolve to zero passes — skip instead of
+            // erroring so a default-valued effect never breaks the frame.
+            if group.is_empty() {
+                continue;
+            }
             let passes = map_effect_passes(group);
             current = self.effects.apply_with_encoder(
                 context,

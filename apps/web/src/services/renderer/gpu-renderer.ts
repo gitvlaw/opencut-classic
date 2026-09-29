@@ -4,6 +4,9 @@ import {
 	initializeGpu,
 } from "opencut-wasm";
 import type { EffectPass, EffectUniformValue } from "@/effects/types";
+import { filterEffectPasses } from "@/effects/capabilities";
+import { applyLutToImageData } from "@/lut/lut-apply";
+import { getLutById, syncLutTexturesToGpu } from "@/lut/lut-registry";
 
 let gpuAvailable = false;
 let initPromise: Promise<void> | null = null;
@@ -13,6 +16,8 @@ export function initializeGpuRenderer(): Promise<void> {
 		initPromise = initializeGpu()
 			.then(() => {
 				gpuAvailable = true;
+				// A (re-)initialized GPU runtime starts with an empty LUT map.
+				syncLutTexturesToGpu();
 			})
 			.catch((error: unknown) => {
 				gpuAvailable = false;
@@ -46,12 +51,18 @@ export const gpuRenderer = {
 			return applyCpuColorFallback({ source, width, height, passes });
 		}
 
+		// Never send passes the deployed bundle cannot render — an unknown
+		// shader id throws inside wasm and would break the whole frame.
+		const supported = filterEffectPasses(passes);
+		if (supported.length === 0) {
+			return source;
+		}
 		try {
 			return applyEffectPasses({
 				source,
 				width,
 				height,
-				passes: serializeEffectPasses(passes),
+				passes: serializeEffectPasses(supported),
 			});
 		} catch {
 			return applyCpuColorFallback({ source, width, height, passes });
@@ -120,9 +131,17 @@ function applyCpuColorFallback({
 		let current: OffscreenCanvas | CanvasImageSource = source;
 		for (const pass of passes) {
 			if (pass.shader === "gaussian-blur") return source; // no CPU blur here
+			if (pass.shader === "lut-3d") {
+				const next = applyCpuLut({ current, width, height, pass });
+				if (next) current = next;
+				continue;
+			}
+			// The fused grade+HSL pass shares the grade data layout [0..13].
+			const shader =
+				pass.shader === "color-grade-hsl" ? "color-grade" : pass.shader;
 			const data = toDataArray(pass.uniforms.u_data);
 			if (!data) continue;
-			const filter = buildCssFilter(pass.shader, data);
+			const filter = buildCssFilter(shader, data);
 			const frame = new OffscreenCanvas(width, height);
 			const fctx = frame.getContext("2d");
 			if (!fctx) continue;
@@ -143,6 +162,40 @@ function toDataArray(v: EffectUniformValue | undefined): number[] | null {
 	if (typeof v === "number") return [v];
 	if (Array.isArray(v)) return v as number[];
 	return null;
+}
+
+/** Exact JS trilinear LUT for the CPU path (u_data = [intensity, size, id]). */
+function applyCpuLut({
+	current,
+	width,
+	height,
+	pass,
+}: {
+	current: OffscreenCanvas | CanvasImageSource;
+	width: number;
+	height: number;
+	pass: EffectPass;
+}): OffscreenCanvas | null {
+	const data = toDataArray(pass.uniforms.u_data);
+	if (!data) return null;
+	const intensity = data[0] ?? 0;
+	const size = Math.round(data[1] ?? 0);
+	const id = Math.round(data[2] ?? 0);
+	if (intensity <= 0.001 || size < 2) return null;
+	const entry = getLutById(id);
+	if (!entry || entry.size !== size) return null;
+	try {
+		const frame = new OffscreenCanvas(width, height);
+		const fctx = frame.getContext("2d");
+		if (!fctx) return null;
+		fctx.drawImage(current, 0, 0, width, height);
+		const img = fctx.getImageData(0, 0, width, height);
+		applyLutToImageData({ img, table: entry.table, size: entry.size, intensity });
+		fctx.putImageData(img, 0, 0);
+		return frame;
+	} catch {
+		return null;
+	}
 }
 
 function buildCssFilter(shader: string, data: number[]): string {

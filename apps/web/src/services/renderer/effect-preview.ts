@@ -1,5 +1,6 @@
 import { createCanvasSurface } from "./canvas-utils";
 import { effectsRegistry, resolveEffectPasses } from "@/effects";
+import { filterEffectPasses } from "@/effects/capabilities";
 import { buildDefaultParamValues } from "@/params/registry";
 import type { ParamValues } from "@/params";
 import { gpuRenderer } from "./gpu-renderer";
@@ -58,12 +59,14 @@ class EffectPreviewService {
 					? params
 					: buildDefaultParamValues(definition.params);
 
-			const passes = resolveEffectPasses({
-				definition,
-				effectParams: resolvedParams,
-				width: uniformDimensions?.width ?? size,
-				height: uniformDimensions?.height ?? size,
-			});
+			const passes = filterEffectPasses(
+				resolveEffectPasses({
+					definition,
+					effectParams: resolvedParams,
+					width: uniformDimensions?.width ?? size,
+					height: uniformDimensions?.height ?? size,
+				}),
+			);
 			const result = this.applyGpuEffect({
 				source,
 				width: size,
