@@ -1,7 +1,17 @@
 import { effectsRegistry } from "../registry";
+import { adjustEffectDefinition } from "./adjust";
 import { blurEffectDefinition } from "./blur";
+import { curvesEffectDefinition } from "./curves";
+import { filterEffectDefinition } from "./filter";
+import { hslEffectDefinition } from "./hsl";
 
-const defaultEffects = [blurEffectDefinition];
+const defaultEffects = [
+	blurEffectDefinition,
+	adjustEffectDefinition,
+	hslEffectDefinition,
+	curvesEffectDefinition,
+	filterEffectDefinition,
+];
 
 export function registerDefaultEffects(): void {
 	for (const definition of defaultEffects) {

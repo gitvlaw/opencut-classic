@@ -26,6 +26,7 @@ import {
 import { cn } from "@/utils/ui";
 import { Separator } from "@/components/ui/separator";
 import { useAssetsPanelStore } from "@/components/editor/panels/assets/assets-panel-store";
+import { EffectHistogram } from "@/effects/components/scopes";
 
 export function StandaloneEffectTab({
 	element,
@@ -142,11 +143,24 @@ export function ClipEffectsTab({
 
 	return (
 		<div className="flex flex-col h-full">
-			<div className="border-b px-3.5 h-11 shrink-0 flex items-center">
+			<div className="border-b px-3.5 h-11 shrink-0 flex items-center justify-between">
 				<SectionTitle>Effects</SectionTitle>
+				<QuickAddColor
+					effects={effects}
+					onAdd={(effectType) =>
+						editor.timeline.addClipEffect({
+							trackId,
+							elementId: element.id,
+							effectType,
+						})
+					}
+				/>
 			</div>
 			{effects.length === 0 ? (
-				<EmptyView />
+				<EmptyView
+					elementId={element.id}
+					trackId={trackId}
+				/>
 			) : (
 				<ul className="flex flex-col">
 					{effects.map((effect, index) => {
@@ -203,8 +217,43 @@ export function ClipEffectsTab({
 	);
 }
 
-function EmptyView() {
+const COLOR_QUICK_ADD: Array<{ type: string; label: string }> = [
+	{ type: "adjust", label: "Adjust" },
+	{ type: "filter", label: "Filter" },
+	{ type: "hsl", label: "HSL" },
+	{ type: "curves", label: "Curves" },
+];
+
+function QuickAddColor({
+	effects,
+	onAdd,
+}: {
+	effects: Effect[];
+	onAdd: (effectType: string) => void;
+}) {
+	const existing = new Set(effects.map((e) => e.type));
+	const missing = COLOR_QUICK_ADD.filter((c) => !existing.has(c.type));
+	if (missing.length === 0) return null;
+	return (
+		<div className="flex items-center gap-1">
+			{missing.map((c) => (
+				<Button
+					key={c.type}
+					variant="ghost"
+					size="sm"
+					className="h-7 px-2 text-xs"
+					onClick={() => onAdd(c.type)}
+				>
+					+ {c.label}
+				</Button>
+			))}
+		</div>
+	);
+}
+
+function EmptyView({ elementId, trackId }: { elementId: string; trackId: string }) {
 	const setActiveTab = useAssetsPanelStore((s) => s.setActiveTab);
+	const editor = useEditor();
 
 	return (
 		<div className="flex flex-col h-full items-center justify-center gap-4 text-center">
@@ -218,6 +267,24 @@ function EmptyView() {
 				<p className="text-muted-foreground text-sm text-balance max-w-44">
 					Add effects to this layer from the Assets panel.
 				</p>
+			</div>
+			<div className="flex flex-wrap items-center justify-center gap-1.5 px-4">
+				{COLOR_QUICK_ADD.map((c) => (
+					<Button
+						key={c.type}
+						variant="outline"
+						size="sm"
+						onClick={() =>
+							editor.timeline.addClipEffect({
+								trackId,
+								elementId,
+								effectType: c.type,
+							})
+						}
+					>
+						+ {c.label}
+					</Button>
+				))}
 			</div>
 			<Button
 				variant="default"
@@ -245,6 +312,29 @@ function EffectSection({
 	onToggle?: () => void;
 	onRemove?: () => void;
 }) {
+	if (!effectsRegistry.has(effect.type)) {
+		return (
+			<Section showTopBorder={false}>
+				<SectionHeader>
+					<SectionTitle className="text-muted-foreground">
+						Unsupported effect ({effect.type})
+					</SectionTitle>
+				</SectionHeader>
+				<SectionContent>
+					<p className="px-4 text-sm text-muted-foreground">
+						This effect is not available in this version. You can safely remove it.
+					</p>
+					{onRemove && (
+						<div className="px-4 pb-4">
+							<Button variant="ghost" size="sm" onClick={onRemove}>
+								Remove
+							</Button>
+						</div>
+					)}
+				</SectionContent>
+			</Section>
+		);
+	}
 	const definition = effectsRegistry.get(effect.type);
 
 	return (
@@ -288,6 +378,12 @@ function EffectSection({
 			<SectionContent
 				className={cn("p-0", onToggle && !effect.enabled && "opacity-50")}
 			>
+				{effect.type === "adjust" && (
+					<div className="flex flex-col gap-3.5 pb-1 pt-3">
+						<EffectHistogram effectType={effect.type} params={renderParams} />
+						<Separator />
+					</div>
+				)}
 				<SectionFields>
 					{definition.params.map((param) => (
 						<div key={param.key} className="flex flex-col gap-3.5">

@@ -7,8 +7,21 @@ use wgpu::util::DeviceExt;
 
 use crate::{EffectPass, UniformValue};
 
-const GAUSSIAN_BLUR_SHADER_ID: &str = "gaussian-blur";
+pub const GAUSSIAN_BLUR_SHADER_ID: &str = "gaussian-blur";
+pub const COLOR_GRADE_SHADER_ID: &str = "color-grade";
+pub const HSL_SHIFT_SHADER_ID: &str = "hsl-shift";
+pub const CURVES_SHADER_ID: &str = "curves";
+pub const COLOR_FILTER_SHADER_ID: &str = "color-filter";
+
 const GAUSSIAN_BLUR_SHADER_SOURCE: &str = include_str!("shaders/gaussian_blur.wgsl");
+const COLOR_GRADE_SHADER_SOURCE: &str = include_str!("shaders/color_grade.wgsl");
+const HSL_SHIFT_SHADER_SOURCE: &str = include_str!("shaders/hsl_shift.wgsl");
+const CURVES_SHADER_SOURCE: &str = include_str!("shaders/curves.wgsl");
+const COLOR_FILTER_SHADER_SOURCE: &str = include_str!("shaders/color_filter.wgsl");
+
+/// Number of generic data floats shared by all color shaders.
+/// Header (resolution + direction) stays for blur backward-compat.
+pub const EFFECT_DATA_FLOATS: usize = 64;
 
 pub struct ApplyEffectsOptions<'a> {
     pub source: &'a wgpu::Texture,
@@ -42,6 +55,12 @@ pub enum EffectsError {
     },
     #[error("Shader '{shader}' does not support uniform '{uniform}'")]
     UnsupportedUniform { shader: String, uniform: String },
+    #[error("Uniform '{uniform}' for shader '{shader}' exceeds {max} floats")]
+    UniformTooLarge {
+        shader: String,
+        uniform: String,
+        max: usize,
+    },
 }
 
 #[repr(C)]
@@ -49,7 +68,7 @@ pub enum EffectsError {
 struct EffectUniformBuffer {
     resolution: [f32; 2],
     direction: [f32; 2],
-    scalars: [f32; 4],
+    data: [f32; EFFECT_DATA_FLOATS],
 }
 
 impl EffectPipeline {
@@ -77,13 +96,6 @@ impl EffectPipeline {
                     label: Some("effects-fullscreen-shader"),
                     source: wgpu::ShaderSource::Wgsl(FULLSCREEN_SHADER_SOURCE.into()),
                 });
-        let gaussian_blur_shader_module =
-            context
-                .device()
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("effects-gaussian-blur-shader"),
-                    source: wgpu::ShaderSource::Wgsl(GAUSSIAN_BLUR_SHADER_SOURCE.into()),
-                });
         let pipeline_layout =
             context
                 .device()
@@ -95,44 +107,62 @@ impl EffectPipeline {
                     ],
                     immediate_size: 0,
                 });
-        let gaussian_blur_pipeline =
-            context
-                .device()
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("effects-gaussian-blur-pipeline"),
-                    layout: Some(&pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &vertex_shader_module,
-                        entry_point: Some("vertex_main"),
-                        buffers: &[wgpu::VertexBufferLayout {
-                            array_stride: std::mem::size_of::<[f32; 2]>() as u64,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &[wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x2,
-                                offset: 0,
-                                shader_location: 0,
+
+        let shaders: &[(&str, &str)] = &[
+            (GAUSSIAN_BLUR_SHADER_ID, GAUSSIAN_BLUR_SHADER_SOURCE),
+            (COLOR_GRADE_SHADER_ID, COLOR_GRADE_SHADER_SOURCE),
+            (HSL_SHIFT_SHADER_ID, HSL_SHIFT_SHADER_SOURCE),
+            (CURVES_SHADER_ID, CURVES_SHADER_SOURCE),
+            (COLOR_FILTER_SHADER_ID, COLOR_FILTER_SHADER_SOURCE),
+        ];
+
+        let mut pipelines = HashMap::with_capacity(shaders.len());
+        for (id, source) in shaders {
+            let module =
+                context
+                    .device()
+                    .create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some(&format!("effects-{id}-shader")),
+                        source: wgpu::ShaderSource::Wgsl((*source).into()),
+                    });
+            let pipeline =
+                context
+                    .device()
+                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some(&format!("effects-{id}-pipeline")),
+                        layout: Some(&pipeline_layout),
+                        vertex: wgpu::VertexState {
+                            module: &vertex_shader_module,
+                            entry_point: Some("vertex_main"),
+                            buffers: &[wgpu::VertexBufferLayout {
+                                array_stride: std::mem::size_of::<[f32; 2]>() as u64,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &[wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x2,
+                                    offset: 0,
+                                    shader_location: 0,
+                                }],
                             }],
-                        }],
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &gaussian_blur_shader_module,
-                        entry_point: Some("fragment_main"),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: context.texture_format(),
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    }),
-                    primitive: wgpu::PrimitiveState::default(),
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview_mask: None,
-                    cache: None,
-                });
-        let pipelines =
-            HashMap::from([(GAUSSIAN_BLUR_SHADER_ID.to_string(), gaussian_blur_pipeline)]);
+                            compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &module,
+                            entry_point: Some("fragment_main"),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: context.texture_format(),
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                            compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        }),
+                        primitive: wgpu::PrimitiveState::default(),
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview_mask: None,
+                        cache: None,
+                    });
+            pipelines.insert(id.to_string(), pipeline);
+        }
 
         Self {
             uniform_bind_group_layout,
@@ -267,6 +297,35 @@ fn pack_effect_uniforms(
     width: u32,
     height: u32,
 ) -> Result<EffectUniformBuffer, EffectsError> {
+    match pass.shader.as_str() {
+        GAUSSIAN_BLUR_SHADER_ID => pack_blur_uniforms(pass, width, height),
+        COLOR_GRADE_SHADER_ID | HSL_SHIFT_SHADER_ID | CURVES_SHADER_ID | COLOR_FILTER_SHADER_ID => {
+            pack_data_uniforms(pass, width, height)
+        }
+        _ => Err(EffectsError::UnknownEffectShader {
+            shader: pass.shader.clone(),
+        }),
+    }
+}
+
+fn base_buffer(
+    width: u32,
+    height: u32,
+    direction: [f32; 2],
+    data: [f32; EFFECT_DATA_FLOATS],
+) -> EffectUniformBuffer {
+    EffectUniformBuffer {
+        resolution: [width as f32, height as f32],
+        direction,
+        data,
+    }
+}
+
+fn pack_blur_uniforms(
+    pass: &EffectPass,
+    width: u32,
+    height: u32,
+) -> Result<EffectUniformBuffer, EffectsError> {
     let shader = pass.shader.as_str();
     let sigma = read_number_uniform(pass, "u_sigma")?;
     let step = read_number_uniform(pass, "u_step")?;
@@ -282,11 +341,52 @@ fn pack_effect_uniforms(
         });
     }
 
-    Ok(EffectUniformBuffer {
-        resolution: [width as f32, height as f32],
-        direction,
-        scalars: [sigma, step, 0.0, 0.0],
-    })
+    let mut data = [0.0f32; EFFECT_DATA_FLOATS];
+    data[0] = sigma;
+    data[1] = step;
+    Ok(base_buffer(width, height, direction, data))
+}
+
+/// Generic path for color shaders: single `u_data` vector (or number).
+fn pack_data_uniforms(
+    pass: &EffectPass,
+    width: u32,
+    height: u32,
+) -> Result<EffectUniformBuffer, EffectsError> {
+    let shader = pass.shader.as_str();
+    let values = read_data_uniform(pass)?;
+    if values.len() > EFFECT_DATA_FLOATS {
+        return Err(EffectsError::UniformTooLarge {
+            shader: shader.to_string(),
+            uniform: "u_data".to_string(),
+            max: EFFECT_DATA_FLOATS,
+        });
+    }
+    for uniform in pass.uniforms.keys() {
+        if uniform == "u_data" {
+            continue;
+        }
+        return Err(EffectsError::UnsupportedUniform {
+            shader: shader.to_string(),
+            uniform: uniform.clone(),
+        });
+    }
+    let mut data = [0.0f32; EFFECT_DATA_FLOATS];
+    data[..values.len()].copy_from_slice(&values);
+    Ok(base_buffer(width, height, [0.0, 0.0], data))
+}
+
+fn read_data_uniform(pass: &EffectPass) -> Result<Vec<f32>, EffectsError> {
+    let Some(value) = pass.uniforms.get("u_data") else {
+        return Err(EffectsError::MissingUniform {
+            shader: pass.shader.clone(),
+            uniform: "u_data".to_string(),
+        });
+    };
+    match value {
+        UniformValue::Number(n) => Ok(vec![*n]),
+        UniformValue::Vector(v) => Ok(v.clone()),
+    }
 }
 
 fn read_number_uniform(pass: &EffectPass, uniform: &str) -> Result<f32, EffectsError> {

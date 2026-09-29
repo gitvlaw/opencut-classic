@@ -6,7 +6,7 @@ struct VertexOutput {
 struct EffectUniforms {
     resolution: vec2f,
     direction: vec2f,
-    scalars: vec4f,
+    data: array<f32, 64>,
 }
 
 @group(0) @binding(0) var input_texture: texture_2d<f32>;
@@ -16,8 +16,8 @@ struct EffectUniforms {
 @fragment
 fn fragment_main(input: VertexOutput) -> @location(0) vec4f {
     let texel_size = vec2f(1.0, 1.0) / uniforms.resolution;
-    let sigma = uniforms.scalars.x;
-    let step_size = uniforms.scalars.y;
+    let sigma = max(uniforms.data[0], 0.001);
+    let step_size = max(uniforms.data[1], 1.0);
 
     var color = vec4f(0.0, 0.0, 0.0, 0.0);
     var total_weight = 0.0;
