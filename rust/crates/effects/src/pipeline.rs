@@ -56,6 +56,9 @@ pub struct EffectPipeline {
 
 struct LutTexture {
     texture: wgpu::Texture,
+    /// LUT edge size N (strip is N*N x N). Kept for validation/debugging;
+    /// the shader reads N from uniforms.
+    #[allow(dead_code)]
     size: u32,
 }
 
