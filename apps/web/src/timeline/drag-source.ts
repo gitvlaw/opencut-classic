@@ -1,0 +1,47 @@
+import type { TimelineDragData } from "@/timeline/drag";
+
+export const TIMELINE_DRAG_MIME = "application/x-timeline-drag";
+
+/**
+ * Owns the state of an in-progress timeline drag session.
+ *
+ * Exists because browsers restrict `DataTransfer.getData()` to the `drop`
+ * event for security — during `dragover`/`dragenter` only `types` is
+ * readable. The drop target needs the payload (element type, target
+ * element types, source duration) while the pointer is hovering, so we
+ * keep a live copy here and hand it out via {@link getActive}.
+ */
+export class TimelineDragSource {
+	private active: TimelineDragData | null = null;
+
+	begin({
+		dataTransfer,
+		dragData,
+	}: {
+		dataTransfer: DataTransfer;
+		dragData: TimelineDragData;
+	}): void {
+		const serialized = JSON.stringify(dragData);
+		try {
+			dataTransfer.setData(TIMELINE_DRAG_MIME, serialized);
+			dataTransfer.setData("application/json", serialized);
+			dataTransfer.setData("text/plain", serialized);
+		} catch {
+			// Some browsers or environments may restrict custom formats
+		}
+		dataTransfer.effectAllowed = "copy";
+		this.active = dragData;
+	}
+
+	end(): void {
+		this.active = null;
+	}
+
+	getActive(): TimelineDragData | null {
+		return this.active;
+	}
+
+	isActive(): boolean {
+		return this.active !== null;
+	}
+}
