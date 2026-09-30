@@ -8,6 +8,7 @@
 //   8..16 color matrix 3x3 row-major (identity default)
 //   17..19 lift rgb (added pre-matrix)
 //   20..22 gain rgb (multiplied pre-matrix)
+//   23 grain time seed in seconds (animates the grain)
 
 struct VertexOutput {
     @builtin(position) position: vec4f,
@@ -58,8 +59,9 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4f {
     let uv = input.tex_coord - vec2f(0.5);
     let vig = 1.0 - dot(uv, uv) * d[7] * 1.2;
     rgb = rgb * clamp(vig, 0.0, 1.0);
-    // grain
-    let g = (hash12(input.tex_coord * uniforms.resolution) - 0.5) * d[6] * 0.08;
+    // grain (time-seeded so it dances instead of freezing on stills)
+    let seed = vec2f(fract(d[23] * 0.371), fract(d[23] * 0.737)) * 271.0;
+    let g = (hash12(input.tex_coord * uniforms.resolution + seed) - 0.5) * d[6] * 0.08;
     rgb = rgb + vec3f(g);
 
     rgb = clamp(rgb, vec3f(0.0), vec3f(1.0));

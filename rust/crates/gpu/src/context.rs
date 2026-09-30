@@ -27,6 +27,7 @@ struct CachedCanvasSurface {
 }
 
 const BLIT_SHADER_SOURCE: &str = include_str!("shaders/blit.wgsl");
+const PRESENT_SHADER_SOURCE: &str = include_str!("shaders/present.wgsl");
 
 const FULLSCREEN_QUAD_POSITIONS: [[f32; 2]; 6] = [
     [-1.0, -1.0],
@@ -48,6 +49,7 @@ pub struct GpuContext {
     nearest_sampler: wgpu::Sampler,
     texture_sampler_bind_group_layout: wgpu::BindGroupLayout,
     blit_pipeline: wgpu::RenderPipeline,
+    present_pipeline: wgpu::RenderPipeline,
     supports_external_texture_copies: bool,
     /// The HTML canvas that the WebGL context is bound to. Only populated on the WebGL
     /// fallback path. Used by render_texture_via_gl_canvas to output frames on WebGL.
@@ -123,6 +125,10 @@ impl GpuContext {
             label: Some("gpu-blit-shader"),
             source: wgpu::ShaderSource::Wgsl(BLIT_SHADER_SOURCE.into()),
         });
+        let present_shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("gpu-present-shader"),
+            source: wgpu::ShaderSource::Wgsl(PRESENT_SHADER_SOURCE.into()),
+        });
         let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("gpu-blit-pipeline-layout"),
             bind_group_layouts: &[Some(&texture_sampler_bind_group_layout)],
@@ -161,6 +167,39 @@ impl GpuContext {
             multiview_mask: None,
             cache: None,
         });
+        let present_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("gpu-present-pipeline"),
+            layout: Some(&blit_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &vertex_shader_module,
+                entry_point: Some("vertex_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 2]>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &present_shader_module,
+                entry_point: Some("fragment_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: texture_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         let supports_external_texture_copies = adapter
             .get_downlevel_capabilities()
@@ -178,6 +217,7 @@ impl GpuContext {
             nearest_sampler,
             texture_sampler_bind_group_layout,
             blit_pipeline,
+            present_pipeline,
             supports_external_texture_copies,
             #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
             gl_canvas,
@@ -397,7 +437,7 @@ impl GpuContext {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("gpu-surface-blit-encoder"),
             });
-        self.encode_texture_blit_to_view(&mut encoder, texture, &target_view, "gpu-surface-blit");
+        self.encode_texture_present_to_view(&mut encoder, texture, &target_view, "gpu-surface-present");
         self.queue.submit([encoder.finish()]);
         surface_texture.present();
         Ok(())
@@ -579,6 +619,54 @@ impl GpuContext {
     }
 
     #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+    /// Final presentation copy with ordered dithering (see present.wgsl).
+    /// Use for surface present / export readback only — never for internal
+    /// copies, which must stay bit-exact through multi-pass chains.
+    pub fn encode_texture_present_to_view(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+        target_view: &wgpu::TextureView,
+        label: &'static str,
+    ) {
+        let source_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("gpu-present-bind-group"),
+            layout: &self.texture_sampler_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                },
+            ],
+        });
+
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(label),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            multiview_mask: None,
+        });
+        render_pass.set_pipeline(&self.present_pipeline);
+        render_pass.set_vertex_buffer(0, self.fullscreen_quad.slice(..));
+        render_pass.set_bind_group(0, &bind_group, &[]);
+        render_pass.draw(0..6, 0..1);
+    }
+
     pub fn render_texture_to_offscreen_canvas(
         &self,
         texture: &wgpu::Texture,

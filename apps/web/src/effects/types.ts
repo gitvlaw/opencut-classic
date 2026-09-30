@@ -20,6 +20,8 @@ export interface EffectPassTemplate {
 		effectParams: ParamValues;
 		width: number;
 		height: number;
+		/** Clip-local time in seconds (for animated grain etc.). Defaults to 0. */
+		timeSeconds?: number;
 	}): Record<string, EffectUniformValue>;
 }
 
@@ -29,6 +31,7 @@ export interface EffectRendererConfig {
 		effectParams: ParamValues;
 		width: number;
 		height: number;
+		timeSeconds?: number;
 	}) => EffectPass[];
 }
 

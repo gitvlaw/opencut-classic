@@ -133,7 +133,7 @@ function num(params: ParamValues, key: string, fallback = 0): number {
 	return Number.isFinite(n) ? n : fallback;
 }
 
-export function filterParamsToData(effectParams: ParamValues): number[] {
+export function filterParamsToData(effectParams: ParamValues, timeSeconds = 0): number[] {
 	const presetId = String(effectParams.preset ?? "none");
 	const preset = getFilterPreset(presetId);
 	const intensity = Math.min(1, Math.max(0, num(effectParams, "intensity", 100) / 100));
@@ -154,12 +154,14 @@ export function filterParamsToData(effectParams: ParamValues): number[] {
 	data[20] = preset.gain[0]!;
 	data[21] = preset.gain[1]!;
 	data[22] = preset.gain[2]!;
+	// Grain time seed — animates the film grain so it doesn't freeze on stills.
+	data[23] = timeSeconds;
 	return data;
 }
 
-export function buildFilterPasses(effectParams: ParamValues): EffectPass[] {
+export function buildFilterPasses(effectParams: ParamValues, timeSeconds = 0): EffectPass[] {
 	if (String(effectParams.preset ?? "none") === "none") return [];
-	const data = filterParamsToData(effectParams);
+	const data = filterParamsToData(effectParams, timeSeconds);
 	if (data[0]! <= 0.001) return [];
 	return [{ shader: COLOR_FILTER_SHADER, uniforms: { u_data: data } }];
 }
@@ -191,9 +193,12 @@ export const filterEffectDefinition: EffectDefinition = {
 		passes: [
 			{
 				shader: COLOR_FILTER_SHADER,
-				uniforms: ({ effectParams }) => ({ u_data: filterParamsToData(effectParams) }),
+				uniforms: ({ effectParams, timeSeconds }) => ({
+					u_data: filterParamsToData(effectParams, timeSeconds),
+				}),
 			},
 		],
-		buildPasses: ({ effectParams }) => buildFilterPasses(effectParams),
+		buildPasses: ({ effectParams, timeSeconds }) =>
+			buildFilterPasses(effectParams, timeSeconds),
 	},
 };

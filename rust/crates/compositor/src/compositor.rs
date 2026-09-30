@@ -401,7 +401,7 @@ impl Compositor {
             }
         }
 
-        context.encode_texture_blit_to_view(
+        context.encode_texture_present_to_view(
             &mut encoder,
             &scene,
             &surface_view,

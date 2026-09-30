@@ -30,11 +30,20 @@ type ExportParams = {
 	audioBuffer?: AudioBuffer;
 };
 
+// NOTE on color management: sources are treated as sRGB/rec.709 (same
+// primaries; transfer differences ignored) and the pipeline presents
+// sRGB-encoded frames, which mediabunny encodes as rec.709. Display-P3
+// sources are not gamut-mapped — out-of-sRGB colors clip. Graded projects
+// should export at very_high/ultra: 4:2:0 chroma subsampling bleeds
+// saturated colors at low bitrates regardless of pipeline precision.
 const qualityMap = {
 	low: QUALITY_LOW,
 	medium: QUALITY_MEDIUM,
 	high: QUALITY_HIGH,
 	very_high: QUALITY_VERY_HIGH,
+	// Ultra: fixed 40 Mbps video to preserve graded color (4:2:0 codecs
+	// bleed saturated reds at lower rates). Audio stays at very_high.
+	ultra: 40_000_000,
 };
 
 export type SceneExporterEvents = {
@@ -122,7 +131,8 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 
 			audioSource = new AudioBufferSource({
 				codec: audioCodec,
-				bitrate: qualityMap[this.quality],
+				bitrate:
+					this.quality === "ultra" ? QUALITY_VERY_HIGH : qualityMap[this.quality],
 			});
 			output.addAudioTrack(audioSource);
 		}

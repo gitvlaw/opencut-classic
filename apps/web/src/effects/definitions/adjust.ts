@@ -2,6 +2,7 @@ import type { EffectDefinition, EffectPass } from "@/effects/types";
 import type { ParamValues } from "@/params";
 
 export const COLOR_GRADE_SHADER = "color-grade";
+export const SHARPEN_SHADER = "sharpen";
 
 /** Order must match color_grade.wgsl data[] layout. */
 const GRADE_KEYS = [
@@ -66,11 +67,24 @@ export function gradeParamsToData(effectParams: ParamValues): number[] {
 	];
 }
 
+export function sharpnessToAmount(effectParams: ParamValues): number {
+	return Math.min(1, Math.max(0, num(effectParams, "sharpness") / 100));
+}
+
 export function buildColorGradePasses(effectParams: ParamValues): EffectPass[] {
 	const data = gradeParamsToData(effectParams);
-	const isIdentity = data.every((v, i) => (i === 0 ? v === 0 : v === 0));
-	if (isIdentity) return [];
-	return [{ shader: COLOR_GRADE_SHADER, uniforms: { u_data: data } }];
+	// Index 13 is sharpness — handled by its own pass below, not the grade.
+	const gradeIdentity = data.slice(0, 13).every((v) => v === 0);
+	const passes: EffectPass[] = [];
+	if (!gradeIdentity) {
+		passes.push({ shader: COLOR_GRADE_SHADER, uniforms: { u_data: data } });
+	}
+	// Sharpness is a separate single-pass Laplacian (needs neighbor taps).
+	const amount = sharpnessToAmount(effectParams);
+	if (amount > 0.001) {
+		passes.push({ shader: SHARPEN_SHADER, uniforms: { u_data: [amount] } });
+	}
+	return passes;
 }
 
 const hundred = (label: string, def = 0) => ({
@@ -108,6 +122,10 @@ export const adjustEffectDefinition: EffectDefinition = {
 			{
 				shader: COLOR_GRADE_SHADER,
 				uniforms: ({ effectParams }) => ({ u_data: gradeParamsToData(effectParams) }),
+			},
+			{
+				shader: SHARPEN_SHADER,
+				uniforms: ({ effectParams }) => ({ u_data: [sharpnessToAmount(effectParams)] }),
 			},
 		],
 		buildPasses: ({ effectParams }) => buildColorGradePasses(effectParams),

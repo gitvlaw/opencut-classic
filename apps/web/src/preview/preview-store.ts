@@ -19,6 +19,8 @@ interface PreviewState {
 	activeGuide: GuideId | null;
 	overlays: PreviewOverlaysState;
 	gridConfig: GridConfig;
+	/** Zebra clipping overlay (session-only, not persisted). */
+	zebra: boolean;
 	toggleGuide: (guideId: GuideId) => void;
 	setGridConfig: (config: Partial<GridConfig>) => void;
 	setOverlayVisibility: ({
@@ -29,6 +31,7 @@ interface PreviewState {
 		isVisible: boolean;
 	}) => void;
 	toggleOverlayVisibility: ({ overlayId }: { overlayId: string }) => void;
+	toggleZebra: () => void;
 }
 
 const DEFAULT_PREVIEW_OVERLAYS: PreviewOverlaysState = {};
@@ -52,6 +55,10 @@ export const usePreviewStore = create<PreviewState>()(
 			activeGuide: null,
 			overlays: DEFAULT_PREVIEW_OVERLAYS,
 			gridConfig: DEFAULT_GRID_CONFIG,
+			zebra: false,
+			toggleZebra: () => {
+				set((state) => ({ zebra: !state.zebra }));
+			},
 			toggleGuide: (guideId) => {
 				set((state) => ({
 					activeGuide: state.activeGuide === guideId ? null : guideId,

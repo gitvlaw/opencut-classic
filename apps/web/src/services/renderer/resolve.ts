@@ -134,6 +134,7 @@ function resolveEffectPassGroups({
 				effectParams: resolvedParams,
 				width,
 				height,
+				timeSeconds: mediaTimeToSeconds({ time: localTime }),
 			});
 		});
 	// Adjacent Adjust→HSL pairs render in one fused pass; empty groups
@@ -616,6 +617,7 @@ function resolveEffectLayerNode({
 			}),
 			width: context.renderer.width,
 			height: context.renderer.height,
+			timeSeconds: mediaTimeToSeconds({ time: localTime }),
 		}),
 	]).flat();
 	if (passes.length === 0) {

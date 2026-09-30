@@ -36,6 +36,8 @@ export function PreviewToolbar({
 			<TimecodeDisplay />
 			<PlayPauseButton />
 			<div className="justify-self-end flex items-center gap-2.5">
+				<ZebraToggle />
+				<Separator orientation="vertical" className="h-4" />
 				<ZoomSelect />
 				<Separator orientation="vertical" className="h-4" />
 				{/* v0.4.0 */}
@@ -141,6 +143,24 @@ function PlayPauseButton() {
 			onClick={() => invokeAction("toggle-play")}
 		>
 			<HugeiconsIcon icon={isPlaying ? PauseIcon : PlayIcon} />
+		</Button>
+	);
+}
+
+function ZebraToggle() {
+	const zebra = usePreviewStore((s) => s.zebra);
+	const toggleZebra = usePreviewStore((s) => s.toggleZebra);
+
+	return (
+		<Button
+			variant={zebra ? "secondary" : "text"}
+			size="sm"
+			title="Zebra: highlight clipped shadows/highlights"
+			aria-pressed={zebra}
+			onClick={toggleZebra}
+			className="h-7 px-2 font-mono text-xs"
+		>
+			ZEBRA
 		</Button>
 	);
 }

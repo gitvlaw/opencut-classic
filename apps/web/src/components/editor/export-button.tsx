@@ -224,7 +224,13 @@ function ExportPopover({
 												<div className="flex items-center space-x-2">
 													<RadioGroupItem value="very_high" id="very_high" />
 													<Label htmlFor="very_high">
-														Very high - Largest file size
+														Very high - Large file size
+													</Label>
+												</div>
+												<div className="flex items-center space-x-2">
+													<RadioGroupItem value="ultra" id="ultra" />
+													<Label htmlFor="ultra">
+														Ultra - Best graded-color fidelity
 													</Label>
 												</div>
 											</RadioGroup>

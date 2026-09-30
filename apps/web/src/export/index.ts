@@ -6,6 +6,7 @@ export const EXPORT_QUALITY_VALUES = [
 	"medium",
 	"high",
 	"very_high",
+	"ultra",
 ] as const;
 
 export const EXPORT_FORMAT_VALUES = ["mp4", "webm"] as const;

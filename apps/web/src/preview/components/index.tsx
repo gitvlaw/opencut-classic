@@ -19,10 +19,14 @@ import type {
 } from "@/preview/overlays";
 import { PreviewContextMenu } from "./context-menu";
 import { PreviewToolbar } from "./toolbar";
+import { usePreviewStore } from "@/preview/preview-store";
 import {
 	PreviewViewportProvider,
 	usePreviewViewportState,
 } from "./preview-viewport";
+
+const ZEBRA_ANALYSIS_WIDTH = 320;
+const ZEBRA_MIN_INTERVAL_MS = 250;
 
 function usePreviewSize() {
 	const canvasSize = useEditor(
@@ -213,6 +217,103 @@ function PreviewCanvas({
 
 	useRafLoop(render);
 
+	// Zebra clipping overlay: re-renders the current frame into a small 2D
+	// canvas (reliable readback, unlike the WebGL output canvas), classifies
+	// clipped highlights/shadows, and paints diagonal stripes over them.
+	// Throttled — a diagnostic, not part of the frame loop.
+	const zebraEnabled = usePreviewStore((s) => s.zebra);
+	const zebraCanvasRef = useRef<HTMLCanvasElement>(null);
+	const zebraRunningRef = useRef(false);
+	const zebraLastRunRef = useRef(0);
+	const zebraTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+	const refreshZebra = useCallback(() => {
+		const overlay = zebraCanvasRef.current;
+		if (!zebraEnabled || !overlay || !renderTree || zebraRunningRef.current) return;
+		zebraRunningRef.current = true;
+		const renderTime = Math.min(
+			editor.playback.getCurrentTime(),
+			editor.timeline.getLastFrameTime(),
+		);
+		const aspect = nativeHeight > 0 ? nativeWidth / nativeHeight : 16 / 9;
+		const aw = ZEBRA_ANALYSIS_WIDTH;
+		const ah = Math.max(1, Math.round(aw / aspect));
+		const analysis = document.createElement("canvas");
+		analysis.width = aw;
+		analysis.height = ah;
+		renderer
+			.renderToCanvas({ node: renderTree, time: renderTime, targetCanvas: analysis })
+			.then(() => {
+				const actx = analysis.getContext("2d", { willReadFrequently: true });
+				if (!actx) return;
+				let img: ImageData;
+				try {
+					img = actx.getImageData(0, 0, aw, ah);
+				} catch {
+					return;
+				}
+				overlay.width = aw;
+				overlay.height = ah;
+				const octx = overlay.getContext("2d");
+				if (!octx) return;
+				const out = octx.createImageData(aw, ah);
+				const d = img.data;
+				const o = out.data;
+				for (let y = 0; y < ah; y++) {
+					for (let x = 0; x < aw; x++) {
+						const i = (y * aw + x) * 4;
+						const l = (0.2126 * d[i]! + 0.7152 * d[i + 1]! + 0.0722 * d[i + 2]!) / 255;
+						const stripe = (x + y) % 8 < 4;
+						if (l > 0.985 && stripe) {
+							o[i] = 255; o[i + 1] = 40; o[i + 2] = 40; o[i + 3] = 220;
+						} else if (l < 0.02 && stripe) {
+							o[i] = 60; o[i + 1] = 140; o[i + 2] = 255; o[i + 3] = 220;
+						} else {
+							o[i + 3] = 0;
+						}
+					}
+				}
+				octx.putImageData(out, 0, 0);
+			})
+			.catch(() => {})
+			.finally(() => {
+				zebraRunningRef.current = false;
+				zebraLastRunRef.current = Date.now();
+			});
+	}, [zebraEnabled, renderTree, renderer, editor.playback, editor.timeline, nativeWidth, nativeHeight]);
+
+	useEffect(() => {
+		if (!zebraEnabled) {
+			if (zebraTimerRef.current) {
+				clearTimeout(zebraTimerRef.current);
+				zebraTimerRef.current = null;
+			}
+			return;
+		}
+		const schedule = () => {
+			const wait = Math.max(0, ZEBRA_MIN_INTERVAL_MS - (Date.now() - zebraLastRunRef.current));
+			if (zebraTimerRef.current) clearTimeout(zebraTimerRef.current);
+			zebraTimerRef.current = setTimeout(() => {
+				refreshZebra();
+				schedule();
+			}, wait);
+		};
+		refreshZebra();
+		const unUpdate = editor.playback.onUpdate(schedule);
+		const unSeek = editor.playback.onSeek(() => {
+			zebraLastRunRef.current = 0;
+			schedule();
+		});
+		return () => {
+			unUpdate();
+			unSeek();
+			if (zebraTimerRef.current) {
+				clearTimeout(zebraTimerRef.current);
+				zebraTimerRef.current = null;
+			}
+		};
+	}, [zebraEnabled, editor.playback, refreshZebra]);
+
 	useEffect(() => {
 		const container = viewportRef.current;
 		if (!container) return;
@@ -322,6 +423,18 @@ function PreviewCanvas({
 											: activeProject?.settings.background.color,
 								}}
 							/>
+							{zebraEnabled && (
+								<canvas
+									ref={zebraCanvasRef}
+									className="pointer-events-none absolute block"
+									style={{
+										left: viewport.sceneLeft,
+										top: viewport.sceneTop,
+										width: viewport.sceneWidth,
+										height: viewport.sceneHeight,
+									}}
+								/>
+							)}
 								<PreviewOverlayLayer
 									instances={overlayInstances}
 									plane="under-interaction"
