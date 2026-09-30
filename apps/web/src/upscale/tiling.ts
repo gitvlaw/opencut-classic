@@ -65,10 +65,45 @@ function ramp(t: number, overlap: number): number {
 	return Math.min(1, Math.max(0, t / overlap));
 }
 
+/** Horizontal blend weight factor at tile-local x (1 = full weight). */
+export function tileWeightX({
+	tile,
+	lx,
+	overlap,
+}: {
+	tile: ImageTile;
+	lx: number;
+	overlap: number;
+}): number {
+	let wx = 1;
+	if (tile.sharedLeft) wx = Math.min(wx, ramp(lx + 0.5, overlap));
+	if (tile.sharedRight) wx = Math.min(wx, ramp(tile.w - 0.5 - lx, overlap));
+	return wx;
+}
+
+/** Vertical blend weight factor at tile-local y (1 = full weight). */
+export function tileWeightY({
+	tile,
+	ly,
+	overlap,
+}: {
+	tile: ImageTile;
+	ly: number;
+	overlap: number;
+}): number {
+	let wy = 1;
+	if (tile.sharedTop) wy = Math.min(wy, ramp(ly + 0.5, overlap));
+	if (tile.sharedBottom) wy = Math.min(wy, ramp(tile.h - 0.5 - ly, overlap));
+	return wy;
+}
+
 /**
  * Blend weight for a pixel at tile-local (lx, ly). Linear ramps across
  * shared edges; accumulation is weight-normalized downstream (like the
  * vocal worker's overlap-add), so any positive coverage is exact.
+ *
+ * Separable: `tileWeight(lx, ly) === tileWeightX(lx) * tileWeightY(ly)`, so
+ * hot loops can build the two 1D ramps once per tile.
  */
 export function tileWeight(
 	tile: ImageTile,
@@ -76,11 +111,7 @@ export function tileWeight(
 	ly: number,
 	overlap: number,
 ): number {
-	let wx = 1;
-	let wy = 1;
-	if (tile.sharedLeft) wx = Math.min(wx, ramp(lx + 0.5, overlap));
-	if (tile.sharedRight) wx = Math.min(wx, ramp(tile.w - 0.5 - lx, overlap));
-	if (tile.sharedTop) wy = Math.min(wy, ramp(ly + 0.5, overlap));
-	if (tile.sharedBottom) wy = Math.min(wy, ramp(tile.h - 0.5 - ly, overlap));
-	return wx * wy;
+	return (
+		tileWeightX({ tile, lx, overlap }) * tileWeightY({ tile, ly, overlap })
+	);
 }

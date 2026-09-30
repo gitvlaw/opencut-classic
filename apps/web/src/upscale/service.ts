@@ -1,4 +1,4 @@
-import { fetchModelWithCache, UPSCALE_MODEL_FP16, UPSCALE_MODEL_FP32 } from "./model";
+import { fetchModelWithCache, UPSCALE_MODEL_CONFIG } from "./model";
 import { chooseTileSize } from "./tiling";
 import type {
 	UpscaleInboundMessage,
@@ -9,6 +9,14 @@ export interface UpscaleFrameProgress {
 	doneTiles: number;
 	totalTiles: number;
 	percentage: number;
+}
+
+/** User aborted the export — never a failure worth falling back from. */
+export class UpscaleCancelledError extends Error {
+	constructor() {
+		super("Upscale cancelled");
+		this.name = "UpscaleCancelledError";
+	}
 }
 
 type PendingJob = {
@@ -75,13 +83,13 @@ export class UpscaleService {
 			rgb[j + 2] = px[i + 2]! / 255;
 		}
 
-		const id = ++this.jobId;
+const id = ++this.jobId;
 		const tileSize = chooseTileSize(width, height);
 		const result = new Promise<OffscreenCanvas>((resolve, reject) => {
 			const wrappedResolve = (canvas: OffscreenCanvas) => {
 				console.info(
 					`[upscale] frame ${width}x${height} (${this.activeModelId}, tile ${tileSize}): ` +
-						`${Math.round(performance.now() - started)}ms total`,
+					`${Math.round(performance.now() - started)}ms total`,
 				);
 				resolve(canvas);
 			};
@@ -94,39 +102,41 @@ export class UpscaleService {
 		return result;
 	}
 
+	/** Reject the in-flight frame without touching the worker lifecycle. */
+	private settlePendingWith(error: Error): void {
+		const pending = this.pending;
+		this.pending = null;
+		pending?.reject(error);
+	}
+
+	/**
+	 * Stop the current job. The pending frame promise is rejected right away
+	 * (never left hanging) and the worker is told to stop at the next tile
+	 * boundary, so a cancel does not wait a whole tile.
+	 */
 	cancel(): void {
 		this.worker?.postMessage({ type: "cancel" } satisfies UpscaleInboundMessage);
+		this.settlePendingWith(new UpscaleCancelledError());
 	}
 
 	dispose(): void {
 		this.worker?.terminate();
 		this.worker = null;
 		this.initPromise = null;
-		this.pending = null;
+		this.settlePendingWith(new UpscaleCancelledError());
 	}
 
 	private async init(
 		onDownload?: (loaded: number, total: number) => void,
 	): Promise<string> {
-		// FP16 first (half bandwidth, faster on RTX); FP32 fallback covers
-		// EPs without float16 support.
-		const errors: string[] = [];
-		for (const config of [UPSCALE_MODEL_FP16, UPSCALE_MODEL_FP32]) {
-			try {
-				const buffer = await fetchModelWithCache(config, onDownload);
-				if (!buffer || buffer.byteLength < 1000) {
-					throw new Error(`Model ${config.id} is missing or empty`);
-				}
-				const provider = await this.initSession(buffer);
-				this.activeModelId = `${config.id}+${provider}`;
-				console.info(`[upscale] session ready: ${this.activeModelId}`);
-				return provider;
-			} catch (error) {
-				errors.push(`${config.id}: ${error instanceof Error ? error.message : String(error)}`);
-				console.warn(`[upscale] ${config.id} failed, trying next:`, error);
-			}
+		const buffer = await fetchModelWithCache(UPSCALE_MODEL_CONFIG, onDownload);
+		if (!buffer || buffer.byteLength < 1000) {
+			throw new Error("Upscale model is missing or empty");
 		}
-		throw new Error(`Upscale init failed: ${errors.join(" | ")}`);
+		const provider = await this.initSession(buffer);
+		this.activeModelId = `${UPSCALE_MODEL_CONFIG.id}+${provider}`;
+		console.info(`[upscale] session ready: ${this.activeModelId}`);
+		return provider;
 	}
 
 	private initSession(buffer: ArrayBuffer): Promise<string> {
@@ -202,15 +212,11 @@ export class UpscaleService {
 				break;
 			}
 			case "cancelled": {
-				const pending = this.pending;
-				this.pending = null;
-				pending?.reject(new Error("Upscale cancelled"));
+				this.settlePendingWith(new UpscaleCancelledError());
 				break;
 			}
 			case "error": {
-				const pending = this.pending;
-				this.pending = null;
-				pending?.reject(new Error(message.message));
+				this.settlePendingWith(new Error(message.message));
 				break;
 			}
 			default:

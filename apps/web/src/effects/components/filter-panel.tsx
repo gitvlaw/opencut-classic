@@ -140,8 +140,9 @@ export function FilterPanel({
 					effects: [{ type: "filter", params: patch, sourceEffectId: "" }],
 				},
 			});
+			const ids = updates.map((u) => u.elementId);
 			editor.timeline.previewElements({ updates });
-			editor.timeline.commitPreview();
+			editor.timeline.commitPreview(ids);
 			return;
 		}
 		// Re-freeze the look: the snapshot versions the

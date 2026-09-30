@@ -747,25 +747,49 @@ export class TimelineManager {
 		if (changedOverlayCount === 0) {
 			return;
 		}
-		this.previewTracks = this.applyPreviewOverlay(committedTracks);
+		this.previewTracks = this.applyPreviewOverlay({ racks: committedTracks });
 		this.notify();
 	}
 
-	commitPreview(): void {
+	/**
+	 * Commit previewed changes as one undo step. Pass `elementIds` to limit
+	 * the step to the elements this operation touched — without it an
+	 * interrupted scrub on an unrelated element would be swept into the
+	 * same history entry.
+	 */
+	commitPreview(elementIds?: readonly string[]): void {
 		if (this.previewOverlay.size === 0) return;
+		const scope = elementIds ? new Set(elementIds) : null;
+		const ids = scope
+			? [...this.previewOverlay.keys()].filter((id) => scope.has(id))
+			: [...this.previewOverlay.keys()];
+		if (ids.length === 0) return;
 		const committedTracks = this.editor.scenes.getActiveSceneOrNull()?.tracks;
 		if (!committedTracks) {
 			return;
 		}
-		const afterTracks =
-			this.previewTracks ?? this.applyPreviewOverlay(committedTracks);
+		// A scoped commit must not sweep in previews from other elements, so
+		// rebuild from the committed tracks applying only the scoped overlay.
+		const afterTracks = scope
+			? this.applyPreviewOverlay({ racks: committedTracks, only: scope })
+			: (this.previewTracks ?? this.applyPreviewOverlay({ racks: committedTracks }));
 		const command = new TracksSnapshotCommand({
 			before: committedTracks,
 			after: afterTracks,
 		});
 		this.editor.command.push({ command });
-		this.previewOverlay.clear();
-		this.previewTracks = null;
+		for (const id of ids) {
+			this.previewOverlay.delete(id);
+		}
+		if (scope) {
+			// Whatever is left belongs to another interaction: re-derive the
+			// preview tracks so the committed state is not re-overlaid.
+			this.previewTracks = this.previewOverlay.size
+				? this.applyPreviewOverlay({ racks: afterTracks })
+				: null;
+		} else {
+			this.previewTracks = null;
+		}
 		this.updateTracks(afterTracks);
 	}
 
@@ -776,21 +800,35 @@ export class TimelineManager {
 		this.notify();
 	}
 
-	private applyPreviewOverlay(tracks: SceneTracks): SceneTracks {
+	/**
+	 * Overlay the previewed values on top of `tracks`. Pass `only` to apply a
+	 * subset of the pending previews (used when a commit is scoped to the
+	 * elements one interaction actually touched).
+	 */
+	private applyPreviewOverlay({
+		racks: tracks,
+		only,
+	}: {
+		racks: SceneTracks;
+		only?: ReadonlySet<string>;
+	}): SceneTracks {
 		if (this.previewOverlay.size === 0) return tracks;
 
 		const applyTrackOverlay = <TTrack extends TimelineTrack>(
 			track: TTrack,
 		): TTrack => {
 			const hasOverlay = track.elements.some((element) =>
-				this.previewOverlay.has(element.id),
+				only ? only.has(element.id) : this.previewOverlay.has(element.id),
 			);
 			if (!hasOverlay) {
 				return track;
 			}
 
 			const nextElements = track.elements.map((element) => {
-				const overlay = this.previewOverlay.get(element.id);
+				const overlay =
+					only && !only.has(element.id)
+						? undefined
+						: this.previewOverlay.get(element.id);
 				return overlay
 					? ({ ...element, ...overlay } as TimelineElement)
 					: element;

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { assertNchwDims, packHwcToNchw, unpackNchwToHwc } from "../tensor";
+import {
+	assertNchwDims,
+	packHwcToNchw,
+	packHwcToNchwInto,
+	unpackNchwToHwc,
+} from "../tensor";
 
 describe("packHwcToNchw", () => {
 	it("round-trips through unpack", () => {
@@ -13,6 +18,23 @@ describe("packHwcToNchw", () => {
 
 	it("rejects bad buffer sizes", () => {
 		expect(() => packHwcToNchw(new Float32Array(5), 2, 2)).toThrow();
+	});
+
+	// The worker packs straight into a reused scratch buffer to avoid a
+	// per-tile allocation; it must match the allocating version exactly.
+	it("packHwcToNchwInto matches packHwcToNchw", () => {
+		const w = 7;
+		const h = 5;
+		const hwc = new Float32Array(w * h * 3);
+		for (let i = 0; i < hwc.length; i++) hwc[i] = ((i * 37) % 101) / 100;
+		const into = new Float32Array(w * h * 3);
+		packHwcToNchwInto({ src: hwc, width: w, height: h, dst: into });
+		expect(Array.from(into)).toEqual(Array.from(packHwcToNchw(hwc, w, h)));
+	});
+
+	it("packHwcToNchwInto rejects short buffers", () => {
+		expect(() => packHwcToNchwInto({ src: new Float32Array(3), width: 2, height: 2, dst: new Float32Array(12) })).toThrow();
+		expect(() => packHwcToNchwInto({ src: new Float32Array(12), width: 2, height: 2, dst: new Float32Array(3) })).toThrow();
 	});
 });
 

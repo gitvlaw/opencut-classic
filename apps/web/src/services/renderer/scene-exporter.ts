@@ -112,7 +112,9 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 
 	cancel(): void {
 		this.isCancelled = true;
-		this.upscaler?.dispose?.();
+		// Must settle the in-flight upscale, not terminate its worker —
+		// dropping the promise would hang the export loop forever.
+		this.upscaler?.cancel?.();
 	}
 
 	/** Canvas the encoder reads. Upscaled copy when requested, else the 2D frame. */
@@ -155,11 +157,17 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 
 	/**
 	 * Fail loud instead of encoding a black file: a fully transparent
-	 * first frame means frame capture broke (never legitimate — the
-	 * compositor clears opaque). Genuinely black content still has
-	 * alpha 255 and passes.
+	 * frame means frame capture broke (never legitimate — the compositor
+	 * clears opaque). Genuinely black content still has alpha 255 and
+	 * passes.
 	 */
-	private assertFrameNotBlank(canvas: HTMLCanvasElement): void {
+	private assertFrameNotBlank({
+		canvas,
+		what,
+	}: {
+		canvas: HTMLCanvasElement;
+		what: string;
+	}): void {
 		const ctx = canvas.getContext("2d", { willReadFrequently: true });
 		if (!ctx) return;
 		let img: ImageData;
@@ -174,9 +182,16 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 			if ((d[i] ?? 0) > 8) return;
 		}
 		throw new Error(
-			"Export rendered a blank (fully transparent) frame — frame capture failed. " +
+			`Export rendered a blank (fully transparent) ${what} — capture failed. ` +
 				"If this persists, export without upscale/AI and report the project setup.",
 		);
+	}
+
+	private async abort(output: Output): Promise<null> {
+		await output.cancel();
+		this.upscaler?.dispose?.();
+		this.emit("cancelled");
+		return null;
 	}
 
 	async export({
@@ -235,37 +250,52 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 			audioSource.close();
 		}
 
-		for (let i = 0; i < frameCount; i++) {
+try {
+			for (let i = 0; i < frameCount; i++) {
+				if (this.isCancelled) {
+					return this.abort(output);
+				}
+
+				const timeTicks = i * ticksPerFrame;
+				const timeSeconds = mediaTimeToSeconds({ time: timeTicks });
+				await this.renderer.renderToCanvas({
+					node: rootNode,
+					time: timeTicks,
+					targetCanvas: this.getFrameCanvas(),
+				});
+				if (i === 0) {
+					this.assertFrameNotBlank({ canvas: this.getFrameCanvas(), what: "frame" });
+				}
+				try {
+					await this.feedFrame();
+				} catch (error) {
+					// The only expected failure here is a user cancel landing
+					// mid-upscale; anything else is a real export error.
+					if (this.isCancelled) return this.abort(output);
+					throw error;
+				}
+				if (i === 0 && this.upscale) {
+					// The upscale path can blank the frame all by itself.
+					this.assertFrameNotBlank({ canvas: this.getFeedCanvas(), what: "upscaled frame" });
+				}
+				await videoSource.add(timeSeconds, 1 / fpsFloat);
+
+				this.emit("progress", i / frameCount);
+			}
+
 			if (this.isCancelled) {
-				await output.cancel();
-				this.emit("cancelled");
-				return null;
+				return this.abort(output);
 			}
 
-			const timeTicks = i * ticksPerFrame;
-			const timeSeconds = mediaTimeToSeconds({ time: timeTicks });
-			await this.renderer.renderToCanvas({
-				node: rootNode,
-				time: timeTicks,
-				targetCanvas: this.getFrameCanvas(),
-			});
-			if (i === 0) {
-				this.assertFrameNotBlank(this.getFrameCanvas());
-			}
-			await this.feedFrame();
-			await videoSource.add(timeSeconds, 1 / fpsFloat);
-
-			this.emit("progress", i / frameCount);
+			videoSource.close();
+			await output.finalize();
+		} catch (error) {
+			// Never leave a half-written muxer (or a live upscale worker)
+			// behind when a frame fails.
+			await output.cancel().catch(() => {});
+			this.upscaler?.dispose?.();
+			throw error;
 		}
-
-		if (this.isCancelled) {
-			await output.cancel();
-			this.emit("cancelled");
-			return null;
-		}
-
-		videoSource.close();
-		await output.finalize();
 		this.upscaler?.dispose?.();
 		this.emit("progress", 1);
 

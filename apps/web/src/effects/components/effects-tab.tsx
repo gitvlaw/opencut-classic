@@ -7,7 +7,7 @@ import type { ParamDefinition, ParamValues, ParamValue } from "@/params";
 import type { Effect } from "@/effects/types";
 import type { EffectElement, VisualElement, TimelineElement } from "@/timeline";
 import type { MediaTime } from "@/wasm";
-import { effectsRegistry } from "@/effects";
+import { buildDefaultEffectInstance, effectsRegistry } from "@/effects";
 import { useEditor } from "@/editor/use-editor";
 import { useElementPreview } from "@/timeline/hooks/use-element-preview";
 import { useElementPlayhead } from "@/components/editor/panels/properties/hooks/use-element-playhead";
@@ -47,6 +47,7 @@ import {
 	collectClipTargets,
 	copyGradeFromElement,
 	setGradeClipboard,
+	stripEffectParamAnimations,
 	useGradeClipboard,
 	type ClipTarget,
 } from "@/effects/grade-clipboard";
@@ -306,7 +307,17 @@ function useClipEffectEditing({
 					? existing
 					: { ...existing, params: { ...existing.params, ...patch } },
 			);
-			previewUpdates({ effects: updatedEffects });
+			// Writing params is not enough: the renderer reads a keyframed
+			// param from its channel, so an existing channel would silently
+			// win over the new value.
+			const animations = stripEffectParamAnimations({
+				animations: renderElement.animations,
+				effectId,
+				paramKeys: Object.keys(patch),
+			});
+			previewUpdates(
+				animations ? { effects: updatedEffects, animations } : { effects: updatedEffects },
+			);
 		};
 
 	const buildPreviewParam =
@@ -368,9 +379,6 @@ export function AdjustmentTab({
 		commit,
 	} = ed;
 
-	const addEffect = (effectType: string) =>
-		editor.timeline.addClipEffect({ trackId, elementId: element.id, effectType });
-
 	const selected = useEditor((e) => e.selection.getSelectedElements());
 	const tracks = useEditor((e) => e.scenes.getActiveScene().tracks);
 	const targets = useMemo(
@@ -378,6 +386,94 @@ export function AdjustmentTab({
 		[selected, tracks],
 	);
 	const clipboard = useGradeClipboard();
+
+	/**
+	 * One history step for the whole selection: build the per-clip effect
+	 * arrays by hand and hand them to the same preview/commit path the
+	 * preset paste uses.
+	 */
+	const applyToAllTargets = (
+		mutate: (effects: Effect[]) => Effect[] | null,
+	) => {
+		const batch = targets.length > 1 ? targets : null;
+		if (!batch) return false;
+		const updates = [];
+		for (const target of batch) {
+			const next = mutate([...(target.element.effects ?? [])]);
+			if (!next) continue;
+			updates.push({
+				trackId: target.trackId,
+				elementId: target.element.id,
+				updates: { effects: next },
+			});
+		}
+		if (updates.length === 0) return true;
+		const ids = updates.map((u) => u.elementId);
+		editor.timeline.previewElements({ updates });
+		editor.timeline.commitPreview(ids);
+		return true;
+	};
+
+	/** Add an effect to every selected clip that doesn't have it yet. */
+	const addEffect = ({
+		effectType,
+		initialParams,
+	}: {
+		effectType: string;
+		initialParams?: ParamValues;
+	}) => {
+		if (
+			applyToAllTargets((effects) => {
+				if (effects.some((e) => e.type === effectType)) return null;
+				const instance = buildDefaultEffectInstance({ effectType });
+				return [
+					...effects,
+					initialParams
+						? { ...instance, params: { ...instance.params, ...initialParams } }
+						: instance,
+				];
+			})
+		) {
+			return;
+		}
+		editor.timeline.addClipEffect({ trackId, elementId: element.id, effectType, initialParams });
+	};
+
+	const toggleEffect = (effect: Effect) => {
+		if (
+			applyToAllTargets((effects) => {
+				const matching = effects.filter((e) => e.type === effect.type);
+				if (matching.length === 0) return null;
+				return effects.map((e) =>
+					e.type === effect.type ? { ...e, enabled: !e.enabled } : e,
+				);
+			})
+		) {
+			return;
+		}
+		editor.timeline.toggleClipEffect({
+			trackId,
+			elementId: element.id,
+			effectId: effect.id,
+		});
+	};
+
+	const removeEffect = (effect: Effect) => {
+		if (
+			applyToAllTargets((effects) => {
+				const matching = effects.filter((e) => e.type === effect.type);
+				if (matching.length === 0) return null;
+				return effects.filter((e) => e.type !== effect.type);
+			})
+		) {
+			return;
+		}
+		editor.timeline.removeClipEffect({
+			trackId,
+			elementId: element.id,
+			effectId: effect.id,
+		});
+	};
 
 	const handleCopyGrade = () => {
 		const source = targets[0]?.element;
@@ -389,8 +485,9 @@ export function AdjustmentTab({
 	const handlePasteGrade = () => {
 		if (!clipboard || targets.length === 0) return;
 		const updates = buildPasteUpdates({ targets, payload: clipboard });
+		const ids = updates.map((u) => u.elementId);
 		editor.timeline.previewElements({ updates });
-		editor.timeline.commitPreview();
+		editor.timeline.commitPreview(ids);
 	};
 
 	const adjust = effects.find((e) => e.type === "adjust");
@@ -413,10 +510,8 @@ export function AdjustmentTab({
 		previewEffectParams: buildPreviewEffectParams(effect.id),
 		patchEffectParam,
 		onCommit: commit,
-		onToggle: () =>
-			editor.timeline.toggleClipEffect({ trackId, elementId: element.id, effectId: effect.id }),
-		onRemove: () =>
-			editor.timeline.removeClipEffect({ trackId, elementId: element.id, effectId: effect.id }),
+		onToggle: () => toggleEffect(effect),
+		onRemove: () => removeEffect(effect),
 	});
 
 	return (
@@ -455,7 +550,7 @@ export function AdjustmentTab({
 					<p className="text-sm text-muted-foreground text-balance">
 						Exposure, contrast, white balance and more — non-destructive, keyframable.
 					</p>
-					<Button variant="default" size="sm" onClick={() => addEffect("adjust")}>
+					<Button variant="default" size="sm" onClick={() => addEffect({ effectType: "adjust" })}>
 						Enable Adjustment
 					</Button>
 				</div>
@@ -467,7 +562,7 @@ export function AdjustmentTab({
 					<span className="text-xs font-medium text-muted-foreground">Color tools</span>
 					<div className="flex flex-wrap gap-1.5">
 						{missing.map((c) => (
-							<Button key={c.type} variant="outline" size="sm" onClick={() => addEffect(c.type)}>
+							<Button key={c.type} variant="outline" size="sm" onClick={() => addEffect({ effectType: c.type })}>
 								+ {c.label}
 							</Button>
 						))}
@@ -480,14 +575,7 @@ export function AdjustmentTab({
 				getRenderParams={getRenderParams}
 				buildPreviewEffectParams={buildPreviewEffectParams}
 				commit={commit}
-				onEnsureAdjust={(preset) => {
-					editor.timeline.addClipEffect({
-						trackId,
-						elementId: element.id,
-						effectType: "adjust",
-						initialParams: preset.params,
-					});
-				}}
+				onEnsureAdjust={(preset: UserGradePreset) => addEffect({ effectType: "adjust", initialParams: preset.params })}
 			/>
 			{colorOthers.map((effect) => (
 				<EffectSection key={effect.id} {...sectionProps(effect)} />
@@ -543,8 +631,9 @@ function MyGradePresets({
 					effects: [{ type: "adjust", params: { ...preset.params }, sourceEffectId: "" }],
 				},
 			});
+			const ids = updates.map((u) => u.elementId);
 			editor.timeline.previewElements({ updates });
-			editor.timeline.commitPreview();
+			editor.timeline.commitPreview(ids);
 			return;
 		}
 		if (adjust) {

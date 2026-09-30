@@ -25,6 +25,8 @@ export interface Upscaler {
 		source: CanvasImageSource,
 		target: UpscaleTarget,
 	): Promise<OffscreenCanvas>;
+	/** Abort the in-flight frame. Must settle the pending `upscale` call. */
+	cancel?(): void;
 	dispose?(): void;
 }
 

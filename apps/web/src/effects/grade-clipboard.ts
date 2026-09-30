@@ -1,5 +1,11 @@
 import { useSyncExternalStore } from "react";
-import type { ElementAnimations } from "@/animation/types";
+import type {
+	AnimationChannel,
+	ChannelData,
+	CompositeChannelData,
+	ElementAnimations,
+} from "@/animation/types";
+import type { MediaTime } from "@/wasm";
 import type { ParamValues } from "@/params";
 import type { TimelineElement, VisualElement } from "@/timeline";
 import type { SceneTracks } from "@/timeline";
@@ -133,10 +139,100 @@ export interface PasteUpdate {
 }
 
 /**
- * Build one preview/commit update per target clip. Same-type effects are
- * overwritten in place (stable id); missing ones are appended with fresh
- * ids and remapped keyframes. Pure — no editor access.
+ * A composite channel nests per-property channels; a scalar one carries
+ * `keys` directly. Distinguish by shape, not by assertion.
  */
+function isCompositeChannel(
+	channel: ChannelData | undefined,
+): channel is CompositeChannelData {
+	return channel !== undefined && !isScalarChannel(channel);
+}
+
+/** A scalar/discrete channel carries `keys`; anything else nests sub-channels. */
+function isScalarChannel(
+	channel: ChannelData,
+): channel is Exclude<ChannelData, CompositeChannelData> {
+	return "keys" in channel;
+}
+
+/**
+ * Past-the-end keyframes are the real failure mode: source keyframe times
+ * are relative to the source clip, so a shorter target keeps keys beyond
+ * its own duration and renders as a flat hold.
+ */
+function clampTime({
+	time,
+	duration,
+}: {
+	time: MediaTime;
+	duration: MediaTime;
+}): MediaTime {
+	return time > duration ? duration : time;
+}
+
+/**
+ * Clamp pasted keyframes into the target clip. Keyframe times are relative
+ * to the source clip, so a shorter target would otherwise keep keys past
+ * its own duration (rendering as a flat hold and committing broken data).
+ * Same clamp the paste-keyframes path uses.
+ */
+function clampKeyframeTimes({
+	animations,
+	duration,
+}: {
+	animations: ElementAnimations | undefined;
+	duration: MediaTime;
+}): ElementAnimations | undefined {
+	if (!animations || duration <= 0) return animations;
+	const out: ElementAnimations = {};
+	for (const [path, channel] of Object.entries(animations)) {
+		// A scalar channel carries `keys`; a composite one nests per-property
+		// channels, so handle both shapes instead of assuming the flat one.
+		if (isCompositeChannel(channel)) {
+			let changed = false;
+			const nested: CompositeChannelData = {};
+			for (const [sub, subChannel] of Object.entries(channel)) {
+				nested[sub] = clampKeys({ channel: subChannel, duration });
+				if (nested[sub] !== subChannel) changed = true;
+			}
+			out[path] = changed ? { ...channel, ...nested } : channel;
+			continue;
+		}
+		out[path] = clampKeys({ channel, duration });
+	}
+	return out;
+}
+
+/** Clamp one scalar/discrete channel's keyframe times into [0, duration]. */
+function clampKeys<TChannel extends AnimationChannel | undefined>({
+	channel,
+	duration,
+}: {
+	channel: TChannel;
+	duration: MediaTime;
+}): TChannel {
+	if (!channel || !("keys" in channel) || channel.keys.length === 0) {
+		return channel;
+	}
+	const keys: { id: string; time: MediaTime }[] = channel.keys;
+	const seen = new Set<MediaTime>();
+	const clamped: { id: string; time: MediaTime }[] = [];
+	let changed = false;
+	for (const key of keys) {
+		const time = clampTime({ time: key.time, duration });
+		if (seen.has(time)) {
+			changed = true;
+			continue;
+		}
+		seen.add(time);
+		if (time !== key.time) changed = true;
+		clamped.push(time === key.time ? key : { ...key, time });
+	}
+	if (!changed) return channel;
+	// Same channel kind and key fields; only the times differ.
+	return { ...channel, keys: clamped };
+}
+
 export function buildPasteUpdates({
 	targets,
 	payload,
@@ -147,24 +243,37 @@ export function buildPasteUpdates({
 	return targets.map(({ trackId, element }) => {
 		const current = element.effects ?? [];
 		const next = [...current];
+		const hadAnimations = element.animations !== undefined;
 		let animations: ElementAnimations | undefined = element.animations
 			? { ...element.animations }
 			: undefined;
+		const updates: PasteUpdate["updates"] = { effects: next };
 
 		for (const src of payload.effects) {
-			const idx = next.findIndex((e) => e.type === src.type);
-			if (idx >= 0) {
-				const existing = next[idx]!;
-				next[idx] = { ...existing, params: { ...src.params } };
+			// Overwrite the first effect of this type; drop any further
+			// same-type duplicates. A leftover duplicate would keep its old
+			// params and re-grade on top of the pasted grade.
+			const firstIdx = next.findIndex((e) => e.type === src.type);
+			const dupIdx = next.findIndex((e, i) => i !== firstIdx && e.type === src.type);
+			if (firstIdx >= 0) {
+				const existing = next[firstIdx]!;
+				next[firstIdx] = { ...existing, params: { ...src.params } };
 				animations = replaceEffectAnimations({
 					animations,
 					effectId: existing.id,
 					replacement: remapEffectAnimations({
-						animations: src.animations,
+						animations: clampKeyframeTimes({
+							animations: src.animations,
+							duration: element.duration,
+							}),
 						oldEffectId: src.sourceEffectId,
 						newEffectId: existing.id,
 					}),
 				});
+				if (dupIdx >= 0) {
+					const [removed] = next.splice(dupIdx, 1);
+					if (removed) animations = dropEffectAnimations({ animations, effectId: removed.id });
+				}
 			} else {
 				const id = generateUUID();
 				next.push({ id, type: src.type, params: { ...src.params }, enabled: true });
@@ -172,7 +281,12 @@ export function buildPasteUpdates({
 					animations,
 					effectId: id,
 					replacement: remapEffectAnimations({
-						animations: src.animations,
+						// Pasted keyframe times are relative to the source
+						// clip — clamp so they land inside this clip.
+						animations: clampKeyframeTimes({
+							animations: src.animations,
+							duration: element.duration,
+							}),
 						oldEffectId: src.sourceEffectId,
 						newEffectId: id,
 					}),
@@ -180,12 +294,67 @@ export function buildPasteUpdates({
 			}
 		}
 
+		// Always carry the key when the clip had any: omitting it leaves
+		// stale channels that override the pasted params.
+		if (hadAnimations || animations) {
+			updates.animations = animations ?? {};
+		}
+
 		return {
 			trackId,
 			elementId: element.id,
-			updates: { effects: next, ...(animations ? { animations } : {}) } as Partial<TimelineElement>,
+			updates,
 		};
 	});
+}
+
+/** Drop every keyframe channel belonging to one effect id. */
+export function dropEffectAnimations({
+	animations,
+	effectId,
+}: {
+	animations: ElementAnimations | undefined;
+	effectId: string;
+}): ElementAnimations | undefined {
+	if (!animations) return undefined;
+	const prefix = `effects.${effectId}.params.`;
+	const base: ElementAnimations = {};
+	for (const [key, value] of Object.entries(animations)) {
+		if (!key.startsWith(prefix)) base[key] = value;
+	}
+	return Object.keys(base).length > 0 ? base : undefined;
+}
+
+/**
+ * Drop the keyframe channels of the params a preset/grade is about to
+ * overwrite. The renderer resolves a keyframed param from its channel, so
+ * a stale channel makes the whole apply a visual no-op.
+ *
+ * Returns `null` when there is nothing to strip (caller should then leave
+ * the element's animations untouched).
+ */
+export function stripEffectParamAnimations({
+	animations,
+	effectId,
+	paramKeys,
+}: {
+	animations: ElementAnimations | undefined;
+	effectId: string;
+	paramKeys: readonly string[];
+}): ElementAnimations | null {
+	if (!animations || paramKeys.length === 0) return null;
+	const params = new Set(paramKeys);
+	let stripped = false;
+	const base: ElementAnimations = {};
+	for (const [key, value] of Object.entries(animations)) {
+		const prefix = `effects.${effectId}.params.`;
+		if (key.startsWith(prefix) && params.has(key.slice(prefix.length))) {
+			stripped = true;
+			continue;
+		}
+		base[key] = value;
+	}
+	return stripped ? base : null;
 }
 
 /**

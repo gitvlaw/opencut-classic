@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { chooseTileSize, computeTiles, tileWeight } from "../tiling";
+import { chooseTileSize, computeTiles, tileWeight, tileWeightX, tileWeightY } from "../tiling";
 import {
 	compute1080pTarget,
 	compute4kTarget,
@@ -56,6 +56,32 @@ describe("computeTiles", () => {
 		expect(tiles[0]).toMatchObject({ sharedLeft: false, sharedRight: true });
 		expect(tiles[1]).toMatchObject({ sharedLeft: true, sharedRight: true });
 		expect(tiles[2]).toMatchObject({ sharedLeft: true, sharedRight: false });
+	});
+});
+
+// The worker builds separable 1D ramps instead of calling tileWeight() per
+// output pixel. That is only valid because tileWeight is a product of an
+// x-only and a y-only term — pin it here.
+describe("tileWeight separability", () => {
+	it("equals wx(x/2) * wy(y/2) for every output pixel", () => {
+		for (const tile of computeTiles(1080, 1920, 512, 16)) {
+			const ow = tile.w * 2;
+			const oh = tile.h * 2;
+			const wx = new Float32Array(ow);
+			const wy = new Float32Array(oh);
+			for (let x = 0; x < ow; x++) {
+				wx[x] = tileWeightX({ tile, lx: Math.min(tile.w - 1, x >> 1), overlap: 16 });
+			}
+			for (let y = 0; y < oh; y++) {
+				wy[y] = tileWeightY({ tile, ly: Math.min(tile.h - 1, y >> 1), overlap: 16 });
+			}
+			for (let y = 0; y < oh; y++) {
+				for (let x = 0; x < ow; x++) {
+					const direct = tileWeight(tile, Math.min(tile.w - 1, x >> 1), Math.min(tile.h - 1, y >> 1), 16);
+					expect((wx[x] ?? 0) * (wy[y] ?? 0)).toBeCloseTo(direct, 10);
+				}
+			}
+		}
 	});
 });
 

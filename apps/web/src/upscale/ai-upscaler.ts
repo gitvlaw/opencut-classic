@@ -1,5 +1,5 @@
 import { registerAiUpscaler } from "./registry";
-import { upscaleService } from "./service";
+import { upscaleService, UpscaleCancelledError } from "./service";
 import { ShaderUpscaler } from "./shader-upscaler";
 import { resize2d, snapshotToOffscreen } from "./types";
 import type { Upscaler, UpscaleTarget } from "./types";
@@ -25,11 +25,18 @@ export class AiUpscaler implements Upscaler {
 		try {
 			return await this.upscaleAi(source, target);
 		} catch (error) {
+			// A cancel must reach the caller, not silently burn a shader
+			// upscale on a frame nobody will encode.
+			if (error instanceof UpscaleCancelledError) throw error;
 			console.warn("AI upscale failed, falling back to shader:", error);
 			this.lastSignature = null;
 			this.lastOutput = null;
 			return this.shader.upscale(source, target);
 		}
+	}
+
+	cancel(): void {
+		upscaleService.cancel();
 	}
 
 	dispose(): void {

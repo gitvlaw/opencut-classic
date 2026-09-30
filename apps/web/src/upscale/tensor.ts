@@ -7,22 +7,44 @@
  * exists with strict dims validation (fail loud, never mosaic).
  */
 
-export function packHwcToNchw(src: Float32Array, width: number, height: number): Float32Array {
-	if (src.length !== width * height * 3) {
-		throw new Error(`Bad HWC buffer: ${src.length} for ${width}x${height}x3`);
+export function packHwcToNchw(
+	src: Float32Array,
+	width: number,
+	height: number,
+): Float32Array {
+	const out = new Float32Array(3 * width * height);
+	packHwcToNchwInto({ src, width, height, dst: out });
+	return out;
+}
+
+/** Allocation-free variant: write NCHW planes into a caller-owned buffer. */
+export function packHwcToNchwInto({
+	src,
+	width,
+	height,
+	dst,
+}: {
+	src: Float32Array;
+	width: number;
+	height: number;
+	dst: Float32Array;
+}): void {
+	const need = width * height * 3;
+	if (src.length < need) {
+		throw new Error(`Bad HWC buffer: ${src.length} < ${need} for ${width}x${height}x3`);
+	}
+	if (dst.length < need) {
+		throw new Error(`Bad NCHW buffer: ${dst.length} < ${need} for ${width}x${height}x3`);
 	}
 	const plane = width * height;
-	const out = new Float32Array(3 * plane);
-	for (let y = 0; y < height; y++) {
-		for (let x = 0; x < width; x++) {
-			const s = (y * width + x) * 3;
-			const p = y * width + x;
-			out[p] = src[s] ?? 0;
-			out[plane + p] = src[s + 1] ?? 0;
-			out[2 * plane + p] = src[s + 2] ?? 0;
-		}
+	// Plane 0 and 1 interleave cleanly; plane 2 is the strided one.
+	for (let i = 0, s = 0; i < plane; i++, s += 3) {
+		dst[i] = src[s] ?? 0;
+		dst[plane + i] = src[s + 1] ?? 0;
 	}
-	return out;
+	for (let i = 0, s = 2; i < plane; i++, s += 3) {
+		dst[2 * plane + i] = src[s] ?? 0;
+	}
 }
 
 export function assertNchwDims(
@@ -47,7 +69,7 @@ export function assertNchwDims(
 
 /** Planar NCHW [1,3,h,w] -> interleaved HWC RGB, values passed through. */
 export function unpackNchwToHwc(
-	out: Float32Array,
+	out: ArrayLike<number>,
 	width: number,
 	height: number,
 	dims: readonly number[],

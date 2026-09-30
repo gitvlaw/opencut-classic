@@ -1,8 +1,8 @@
 /// <reference lib="webworker" />
 
 import * as ort from "onnxruntime-web";
-import { computeTiles, tileWeight } from "./tiling";
-import { packHwcToNchw, unpackNchwToHwc } from "./tensor";
+import { computeTiles, tileWeightX, tileWeightY } from "./tiling";
+import { assertNchwDims, packHwcToNchwInto } from "./tensor";
 import type {
 	UpscaleInboundMessage,
 	UpscaleOutboundMessage,
@@ -13,9 +13,17 @@ declare const self: DedicatedWorkerGlobalScope;
 const UPSCALE_FACTOR = 2;
 const DEFAULT_TILE_SIZE = 256;
 const TILE_OVERLAP = 16;
+/** ~48M output pixels (8192x5760). Beyond this the accumulator alone would
+ * need ~600MB and the tab dies instead of exporting. */
+const MAX_OUTPUT_PIXELS = 48_000_000;
 
 let session: ort.InferenceSession | null = null;
 let isCancelled = false;
+
+/** Reused across frames — a fresh 100MB accumulator per frame thrashes GC. */
+let accumulators: { acc: Float32Array; weights: Float32Array; w: number; h: number } | null =
+	null;
+let scratch: { cropped: Float32Array; nchw: Float32Array; size: number } | null = null;
 
 const origin = typeof self !== "undefined" && self.location?.origin ? self.location.origin : "";
 ort.env.wasm.wasmPaths = origin ? `${origin}/onnx/` : "/onnx/";
@@ -92,8 +100,23 @@ async function handleUpscaleImage(
 
 		const outW = width * UPSCALE_FACTOR;
 		const outH = height * UPSCALE_FACTOR;
-		const acc = new Float32Array(outW * outH * 3);
-		const weights = new Float32Array(outW * outH);
+		if (outW * outH > MAX_OUTPUT_PIXELS) {
+			throw new Error(
+				`Upscale target ${outW}x${outH} is too large for the AI path. ` +
+					"Pick a smaller resolution, or export without AI enhance.",
+			);
+		}
+		if (!accumulators || accumulators.w !== outW || accumulators.h !== outH) {
+			accumulators = {
+				acc: new Float32Array(outW * outH * 3),
+				weights: new Float32Array(outW * outH),
+				w: outW,
+				h: outH,
+			};
+		}
+		const { acc, weights } = accumulators;
+		acc.fill(0);
+		weights.fill(0);
 
 		const tiles = computeTiles(width, height, tile, TILE_OVERLAP);
 		const inputName = session.inputNames[0] ?? "input";
@@ -101,51 +124,72 @@ async function handleUpscaleImage(
 
 		let done = 0;
 		let inferMsTotal = 0;
-		for (const tile of tiles) {
+		// Per-tile feather ramps. tileWeight is separable, so build the two
+		// 1D tables once per tile instead of calling it per output pixel.
+		// MUST be rebuilt per tile: the ramps depend on the shared edges.
+		const wxRamp = new Float32Array(tile * UPSCALE_FACTOR);
+		const wyRamp = new Float32Array(tile * UPSCALE_FACTOR);
+		for (const t of tiles) {
 			if (isCancelled) {
 				post({ type: "cancelled" });
 				return;
 			}
 
-			// Crop HWC float tile -> NCHW tensor.
-			const cropped = new Float32Array(tile.w * tile.h * 3);
-			for (let y = 0; y < tile.h; y++) {
-				for (let x = 0; x < tile.w; x++) {
-					const src = ((tile.y + y) * width + (tile.x + x)) * 3;
-					const px = (y * tile.w + x) * 3;
-					cropped[px] = data[src] ?? 0;
-					cropped[px + 1] = data[src + 1] ?? 0;
-					cropped[px + 2] = data[src + 2] ?? 0;
-				}
+			const tw = t.w;
+			const th = t.h;
+			const needed = tw * th * 3;
+			if (!scratch || scratch.size < needed) {
+				scratch = { cropped: new Float32Array(needed), nchw: new Float32Array(needed), size: needed };
 			}
-			const nchw = packHwcToNchw(cropped, tile.w, tile.h);
+			const { cropped, nchw } = scratch;
+
+			// Row-wise crop of the HWC float frame into the tile buffer.
+			for (let y = 0; y < th; y++) {
+				const srcStart = ((t.y + y) * width + t.x) * 3;
+				cropped.set(data.subarray(srcStart, srcStart + tw * 3), y * tw * 3);
+			}
+			packHwcToNchwInto({ src: cropped, width: tw, height: th, dst: nchw });
 
 			const feeds: Record<string, ort.Tensor> = {};
-			feeds[inputName] = new ort.Tensor("float32", nchw, [1, 3, tile.h, tile.w]);
+			feeds[inputName] = new ort.Tensor("float32", nchw.subarray(0, tw * th * 3), [1, 3, th, tw]);
 			const inferStart = performance.now();
 			const results = await session.run(feeds);
 			inferMsTotal += performance.now() - inferStart;
 			const outputTensor = results[outputName];
-			const out = outputTensor?.data as Float32Array | undefined;
+			const out = outputTensor?.data as ArrayLike<number> | undefined;
 			if (!out) throw new Error("Upscale model returned no output");
-			const oh = tile.h * UPSCALE_FACTOR;
-			const ow = tile.w * UPSCALE_FACTOR;
+			const oh = th * UPSCALE_FACTOR;
+			const ow = tw * UPSCALE_FACTOR;
 			// NCHW planar output, dims-validated (never silently mosaiced).
 			const dims = outputTensor?.dims as readonly number[] | undefined;
 			if (!dims) throw new Error("Upscale model returned output without dims");
-			const hwc = unpackNchwToHwc(out, ow, oh, dims);
+			assertNchwDims(dims, ow, oh, "upscale output");
+			const plane = ow * oh;
+
+			for (let x = 0; x < ow; x++) {
+				wxRamp[x] = tileWeightX({ tile: t, lx: Math.min(tw - 1, x >> 1), overlap: TILE_OVERLAP });
+			}
 			for (let y = 0; y < oh; y++) {
+				wyRamp[y] = tileWeightY({ tile: t, ly: Math.min(th - 1, y >> 1), overlap: TILE_OVERLAP });
+			}
+
+			const tileOriginX = t.x * UPSCALE_FACTOR;
+			const tileOriginY = t.y * UPSCALE_FACTOR;
+			for (let y = 0; y < oh; y++) {
+				const wy = wyRamp[y] ?? 0;
+				if (wy <= 0) continue;
+				const dstRow = (tileOriginY + y) * outW;
+				const srcRow = y * ow;
 				for (let x = 0; x < ow; x++) {
-					const sx = Math.min(tile.w - 1, Math.floor(x / UPSCALE_FACTOR));
-					const sy = Math.min(tile.h - 1, Math.floor(y / UPSCALE_FACTOR));
-					const w = tileWeight(tile, sx, sy, TILE_OVERLAP);
+					const w = (wxRamp[x] ?? 0) * wy;
 					if (w <= 0) continue;
-					const gx = (tile.y * UPSCALE_FACTOR + y) * outW + (tile.x * UPSCALE_FACTOR + x);
-					const o = (y * ow + x) * 3;
-					acc[gx * 3] += (hwc[o] ?? 0) * w;
-					acc[gx * 3 + 1] += (hwc[o + 1] ?? 0) * w;
-					acc[gx * 3 + 2] += (hwc[o + 2] ?? 0) * w;
-					weights[gx] += w;
+					const gx = dstRow + tileOriginX + x;
+					const o = (srcRow + x) * 3;
+					const gi = gx * 3;
+					acc[gi] = (acc[gi] ?? 0) + (out[o] ?? 0) * w;
+					acc[gi + 1] = (acc[gi + 1] ?? 0) + (out[plane + o] ?? 0) * w;
+					acc[gi + 2] = (acc[gi + 2] ?? 0) + (out[2 * plane + o] ?? 0) * w;
+					weights[gx] = (weights[gx] ?? 0) + w;
 				}
 			}
 
@@ -179,6 +223,9 @@ async function handleUpscaleImage(
 			},
 			[acc.buffer as Transferable],
 		);
+		// The transfer detached the buffer — drop the cache so the next frame
+		// allocates instead of writing into a detached view.
+		accumulators = null;
 	} catch (error) {
 		post({ type: "error", message: error instanceof Error ? error.message : String(error) });
 	}
