@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { buildEffectParamPath, resolveAnimationPathValueAtTime } from "@/animation";
 import type { ElementAnimations } from "@/animation/types";
 import type { ParamDefinition, ParamValues, ParamValue } from "@/params";
@@ -42,6 +42,14 @@ import {
 	type CurveChannel,
 } from "@/effects/definitions/curves";
 import type { LutEntry } from "@/lut/lut-registry";
+import {
+	buildPasteUpdates,
+	collectClipTargets,
+	copyGradeFromElement,
+	setGradeClipboard,
+	useGradeClipboard,
+	type ClipTarget,
+} from "@/effects/grade-clipboard";
 import {
 	deleteGradePreset,
 	listGradePresets,
@@ -363,6 +371,28 @@ export function AdjustmentTab({
 	const addEffect = (effectType: string) =>
 		editor.timeline.addClipEffect({ trackId, elementId: element.id, effectType });
 
+	const selected = useEditor((e) => e.selection.getSelectedElements());
+	const tracks = useEditor((e) => e.scenes.getActiveScene().tracks);
+	const targets = useMemo(
+		() => collectClipTargets({ selected, tracks }),
+		[selected, tracks],
+	);
+	const clipboard = useGradeClipboard();
+
+	const handleCopyGrade = () => {
+		const source = targets[0]?.element;
+		if (!source) return;
+		const payload = copyGradeFromElement(source);
+		setGradeClipboard(payload, payload ? `${payload.effects.length} effect(s)` : "");
+	};
+
+	const handlePasteGrade = () => {
+		if (!clipboard || targets.length === 0) return;
+		const updates = buildPasteUpdates({ targets, payload: clipboard });
+		editor.timeline.previewElements({ updates });
+		editor.timeline.commitPreview();
+	};
+
 	const adjust = effects.find((e) => e.type === "adjust");
 	const colorOthers = effects.filter(
 		(e) => e.type !== "adjust" && COLOR_EFFECT_TYPES.includes(e.type),
@@ -391,8 +421,34 @@ export function AdjustmentTab({
 
 	return (
 		<div className="flex flex-col h-full">
-			<div className="border-b px-3.5 h-11 shrink-0 flex items-center">
+			<div className="border-b px-3.5 h-11 shrink-0 flex items-center justify-between">
 				<SectionTitle>Adjustment</SectionTitle>
+				<div className="flex items-center gap-1">
+					<Button
+						variant="ghost"
+						size="sm"
+						className="h-7 px-2 text-xs"
+						title={targets.length > 0 ? "Copy grade from the first selected clip" : "Select a clip first"}
+						disabled={targets.length === 0}
+						onClick={handleCopyGrade}
+					>
+						Copy grade
+					</Button>
+					<Button
+						variant="ghost"
+						size="sm"
+						className="h-7 px-2 text-xs"
+						title={
+							clipboard
+								? `Paste grade onto ${targets.length} clip(s) — one undo step`
+								: "Copy a grade first"
+						}
+						disabled={!clipboard || targets.length === 0}
+						onClick={handlePasteGrade}
+					>
+						Paste{targets.length > 1 ? ` (${targets.length})` : ""}
+					</Button>
+				</div>
 			</div>
 			{!adjust ? (
 				<div className="flex flex-col items-center gap-3 px-4 py-6 text-center">
@@ -420,6 +476,7 @@ export function AdjustmentTab({
 			)}
 			<MyGradePresets
 				adjust={adjust ?? null}
+				targets={targets}
 				getRenderParams={getRenderParams}
 				buildPreviewEffectParams={buildPreviewEffectParams}
 				commit={commit}
@@ -448,17 +505,20 @@ export const COLOR_EFFECT_TYPES = ["adjust", "wheels", "filter", "lut", "hsl", "
  */
 function MyGradePresets({
 	adjust,
+	targets,
 	getRenderParams,
 	buildPreviewEffectParams,
 	commit,
 	onEnsureAdjust,
 }: {
 	adjust: Effect | null;
+	targets: ClipTarget[];
 	getRenderParams: ({ effectId }: { effectId: string }) => ParamValues;
 	buildPreviewEffectParams: (effectId: string) => (patch: ParamValues) => void;
 	commit: () => void;
 	onEnsureAdjust: (preset: UserGradePreset) => void;
 }) {
+	const editor = useEditor();
 	const [, force] = useState(0);
 	const [name, setName] = useState("");
 	const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -475,6 +535,18 @@ function MyGradePresets({
 	};
 
 	const handleApply = (preset: UserGradePreset) => {
+		// Batch: one undo step for all selected clips.
+		if (targets.length > 1) {
+			const updates = buildPasteUpdates({
+				targets,
+				payload: {
+					effects: [{ type: "adjust", params: { ...preset.params }, sourceEffectId: "" }],
+				},
+			});
+			editor.timeline.previewElements({ updates });
+			editor.timeline.commitPreview();
+			return;
+		}
 		if (adjust) {
 			buildPreviewEffectParams(adjust.id)(preset.params);
 			commit();
@@ -534,9 +606,16 @@ function MyGradePresets({
 									type="button"
 									className="flex-1 truncate text-left text-sm"
 									onClick={() => handleApply(preset)}
-									title="Apply to this clip"
+									title={
+										targets.length > 1
+											? `Apply to ${targets.length} clips (one undo step)`
+											: "Apply to this clip"
+									}
 								>
 									{preset.name}
+									{targets.length > 1 && (
+										<span className="text-muted-foreground"> ({targets.length})</span>
+									)}
 								</button>
 							)}
 							<Button

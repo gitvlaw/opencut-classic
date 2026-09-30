@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { PropertyParamField } from "@/components/editor/panels/properties/components/property-param-field";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/utils/ui";
@@ -11,9 +11,11 @@ import type { Effect } from "@/effects/types";
 import type { TimelineElement } from "@/timeline";
 import type { MediaTime } from "@/wasm";
 import { effectsRegistry } from "@/effects";
+import { useEditor } from "@/editor/use-editor";
 import { useKeyframedParamProperty } from "@/components/editor/panels/properties/hooks/use-keyframed-param-property";
 import { effectPreviewService } from "@/services/renderer/effect-preview";
 import { FILTER_PRESETS, buildFilterSnapshot } from "@/effects/definitions/filter";
+import { buildPasteUpdates, collectClipTargets } from "@/effects/grade-clipboard";
 
 const THUMB_SIZE = 96;
 
@@ -119,8 +121,42 @@ export function FilterPanel({
 		buildBaseUpdates: ({ value }) => patchEffectParam(effect.id, "intensity", value),
 	});
 
+	// Batch: gallery preset applies to every selected clip in one undo step.
+	const editor = useEditor();
+	const selected = useEditor((e) => e.selection.getSelectedElements());
+	const tracks = useEditor((e) => e.scenes.getActiveScene().tracks);
+	const targets = useMemo(
+		() => collectClipTargets({ selected, tracks }),
+		[selected, tracks],
+	);
+	const isBatch = targets.length > 1;
+
+	const handlePickPreset = (presetId: string) => {
+		const patch = { preset: presetId, snapshot: buildFilterSnapshot(presetId) };
+		if (isBatch) {
+			const updates = buildPasteUpdates({
+				targets,
+				payload: {
+					effects: [{ type: "filter", params: patch, sourceEffectId: "" }],
+				},
+			});
+			editor.timeline.previewElements({ updates });
+			editor.timeline.commitPreview();
+			return;
+		}
+		// Re-freeze the look: the snapshot versions the
+		// preset against future library edits.
+		previewEffectParams(patch);
+		onCommit();
+	};
+
 	return (
 		<div className="flex flex-col">
+			{isBatch && (
+				<p className="text-muted-foreground px-4 pt-2 text-xs">
+					Preset applies to all {targets.length} selected clips.
+				</p>
+			)}
 			<div className="grid grid-cols-4 gap-1 px-3 py-2">
 				{FILTER_PRESETS.map((preset) => (
 					<PresetThumb
@@ -128,15 +164,7 @@ export function FilterPanel({
 						presetId={preset.id}
 						presetName={preset.name}
 						active={activePreset === preset.id}
-						onPick={() => {
-							// Re-freeze the look: the snapshot versions the
-							// preset against future library edits.
-							previewEffectParams({
-								preset: preset.id,
-								snapshot: buildFilterSnapshot(preset.id),
-							});
-							onCommit();
-						}}
+						onPick={() => handlePickPreset(preset.id)}
 					/>
 				))}
 			</div>
