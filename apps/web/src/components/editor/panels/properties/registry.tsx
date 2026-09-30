@@ -21,9 +21,10 @@ import {
 	MusicNote03Icon,
 	MagicWand05Icon,
 	DashboardSpeed02Icon,
+	SlidersHorizontalIcon,
 } from "@hugeicons/core-free-icons";
 import { ElementParamsTab } from "./components/element-params-tab";
-import { ClipEffectsTab, StandaloneEffectTab } from "@/effects/components/effects-tab";
+import { AdjustmentTab, ClipEffectsTab, StandaloneEffectTab } from "@/effects/components/effects-tab";
 import { MasksTab } from "@/masks/components/masks-tab";
 import { SpeedTab } from "@/speed/components/speed-tab";
 import { GraphicTab } from "@/graphics/components/graphic-tab";
@@ -191,6 +192,21 @@ function buildClipEffectsTab({
 	};
 }
 
+function buildAdjustmentTab({
+	element,
+}: {
+	element: VideoElement | ImageElement;
+}): PropertiesTabDef {
+	return {
+		id: "adjustment",
+		label: "Adjustment",
+		icon: <HugeiconsIcon icon={SlidersHorizontalIcon} size={16} />,
+		content: ({ trackId }) => (
+			<AdjustmentTab element={element} trackId={trackId} />
+		),
+	};
+}
+
 function buildTextTab({
 	element,
 	elementsWithTracks,
@@ -271,6 +287,7 @@ function getVideoConfig({
 		defaultTab: "transform",
 		tabs: [
 			buildTransformTab({ element }),
+			buildAdjustmentTab({ element }),
 			...(showAudioTab ? [buildAudioTab({ element })] : []),
 			buildSpeedTab({ element }),
 			buildBlendingTab({ element }),
@@ -289,6 +306,7 @@ function getImageConfig({
 		defaultTab: "transform",
 		tabs: [
 			buildTransformTab({ element }),
+			buildAdjustmentTab({ element }),
 			buildBlendingTab({ element }),
 			buildMasksTab({ element }),
 			buildClipEffectsTab({ element }),

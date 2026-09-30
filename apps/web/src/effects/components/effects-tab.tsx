@@ -42,6 +42,8 @@ import {
 	type CurveChannel,
 } from "@/effects/definitions/curves";
 import type { LutEntry } from "@/lut/lut-registry";
+import { WheelPad } from "@/effects/components/color-wheels";
+import { WHEEL_ZONES, WHEEL_ZONE_LABELS } from "@/effects/definitions/wheels";
 
 export function StandaloneEffectTab({
 	element,
@@ -114,45 +116,18 @@ export function ClipEffectsTab({
 	const [dragIndex, setDragIndex] = useState<number | null>(null);
 	const [dropIndex, setDropIndex] = useState<number | null>(null);
 	const editor = useEditor();
-	const { renderElement, previewUpdates, commit } = useElementPreview({
-		trackId,
-		elementId: element.id,
-		fallback: element,
-	});
-	const { localTime, isPlayheadWithinElementRange } = useElementPlayhead({
-		startTime: element.startTime,
-		duration: element.duration,
-	});
-
-	const effects: Effect[] = element.effects ?? [];
-	const renderEffects: Effect[] =
-		(renderElement as VisualElement).effects ?? effects;
-
-	const getRenderParams = ({ effectId }: { effectId: string }): ParamValues => {
-		return (
-			(renderElement as VisualElement).effects?.find((ef) => ef.id === effectId)
-				?.params ??
-			effects.find((ef) => ef.id === effectId)?.params ??
-			{}
-		);
-	};
-
-	const buildPreviewParam =
-		(effectId: string) =>
-		(key: string) =>
-		(value: number | string | boolean) => {
-			buildPreviewEffectParams(effectId)({ [key]: value });
-		};
-
-	const buildPreviewEffectParams =
-		(effectId: string) => (patch: ParamValues) => {
-			const updatedEffects = renderEffects.map((existing) =>
-				existing.id !== effectId
-					? existing
-					: { ...existing, params: { ...existing.params, ...patch } },
-			);
-			previewUpdates({ effects: updatedEffects });
-		};
+	const ed = useClipEffectEditing({ element, trackId });
+	const {
+		renderElement,
+		effects,
+		localTime,
+		isPlayheadWithinElementRange,
+		getRenderParams,
+		buildPreviewParam,
+		buildPreviewEffectParams,
+		patchEffectParam,
+		commit,
+	} = ed;
 
 	const handleDragStart = ({ index }: { index: number }) => setDragIndex(index);
 
@@ -242,16 +217,7 @@ export function ClipEffectsTab({
 									renderParams={getRenderParams({ effectId: effect.id })}
 									previewParam={buildPreviewParam(effect.id)}
 									previewEffectParams={buildPreviewEffectParams(effect.id)}
-									patchEffectParam={(_effectId, key, value) => ({
-										effects: renderEffects.map((existing) =>
-											existing.id !== effect.id
-												? existing
-												: {
-														...existing,
-														params: { ...existing.params, [key]: value },
-													},
-										),
-									})}
+									patchEffectParam={patchEffectParam}
 									onCommit={commit}
 									onToggle={() =>
 										editor.timeline.toggleClipEffect({
@@ -279,11 +245,180 @@ export function ClipEffectsTab({
 
 const COLOR_QUICK_ADD: Array<{ type: string; label: string }> = [
 	{ type: "adjust", label: "Adjust" },
+	{ type: "wheels", label: "Wheels" },
 	{ type: "filter", label: "Filter" },
 	{ type: "lut", label: "LUT" },
 	{ type: "hsl", label: "HSL" },
 	{ type: "curves", label: "Curves" },
 ];
+
+/** Shared clip-effect editing state (preview, playhead, param writers). */
+function useClipEffectEditing({
+	element,
+	trackId,
+}: {
+	element: VisualElement;
+	trackId: string;
+}) {
+	const { renderElement, previewUpdates, commit } = useElementPreview({
+		trackId,
+		elementId: element.id,
+		fallback: element,
+	});
+	const { localTime, isPlayheadWithinElementRange } = useElementPlayhead({
+		startTime: element.startTime,
+		duration: element.duration,
+	});
+
+	const effects: Effect[] = element.effects ?? [];
+	const renderEffects: Effect[] =
+		(renderElement as VisualElement).effects ?? effects;
+
+	const getRenderParams = ({ effectId }: { effectId: string }): ParamValues => {
+		return (
+			(renderElement as VisualElement).effects?.find((ef) => ef.id === effectId)
+				?.params ??
+			effects.find((ef) => ef.id === effectId)?.params ??
+			{}
+		);
+	};
+
+	const buildPreviewEffectParams =
+		(effectId: string) => (patch: ParamValues) => {
+			const updatedEffects = renderEffects.map((existing) =>
+				existing.id !== effectId
+					? existing
+					: { ...existing, params: { ...existing.params, ...patch } },
+			);
+			previewUpdates({ effects: updatedEffects });
+		};
+
+	const buildPreviewParam =
+		(effectId: string) =>
+		(key: string) =>
+		(value: number | string | boolean) => {
+			buildPreviewEffectParams(effectId)({ [key]: value });
+		};
+
+	const patchEffectParam = (
+		effectId: string,
+		key: string,
+		value: ParamValue,
+	): Partial<TimelineElement> => ({
+		effects: renderEffects.map((existing) =>
+			existing.id !== effectId
+				? existing
+				: { ...existing, params: { ...existing.params, [key]: value } },
+		),
+	});
+
+	return {
+		renderElement,
+		effects,
+		renderEffects,
+		localTime,
+		isPlayheadWithinElementRange,
+		getRenderParams,
+		buildPreviewParam,
+		buildPreviewEffectParams,
+		patchEffectParam,
+		commit,
+	};
+}
+
+/**
+ * Dedicated Adjustment tab (CapCut-style color home): the Adjust effect
+ * with histogram, plus quick-add and panels for the other color tools.
+ * Non-color effects (blur, …) stay in the Effects tab.
+ */
+export function AdjustmentTab({
+	element,
+	trackId,
+}: {
+	element: VisualElement;
+	trackId: string;
+}) {
+	const editor = useEditor();
+	const ed = useClipEffectEditing({ element, trackId });
+	const {
+		renderElement,
+		effects,
+		localTime,
+		isPlayheadWithinElementRange,
+		getRenderParams,
+		buildPreviewParam,
+		buildPreviewEffectParams,
+		patchEffectParam,
+		commit,
+	} = ed;
+
+	const addEffect = (effectType: string) =>
+		editor.timeline.addClipEffect({ trackId, elementId: element.id, effectType });
+
+	const adjust = effects.find((e) => e.type === "adjust");
+	const colorOthers = effects.filter(
+		(e) => e.type !== "adjust" && COLOR_EFFECT_TYPES.includes(e.type),
+	);
+	const missing = COLOR_QUICK_ADD.filter(
+		(c) => c.type !== "adjust" && !effects.some((e) => e.type === c.type),
+	);
+
+	const sectionProps = (effect: Effect) => ({
+		effect,
+		trackId,
+		elementId: element.id,
+		animations: (renderElement as VisualElement).animations,
+		localTime,
+		isPlayheadWithinElementRange,
+		renderParams: getRenderParams({ effectId: effect.id }),
+		previewParam: buildPreviewParam(effect.id),
+		previewEffectParams: buildPreviewEffectParams(effect.id),
+		patchEffectParam,
+		onCommit: commit,
+		onToggle: () =>
+			editor.timeline.toggleClipEffect({ trackId, elementId: element.id, effectId: effect.id }),
+		onRemove: () =>
+			editor.timeline.removeClipEffect({ trackId, elementId: element.id, effectId: effect.id }),
+	});
+
+	return (
+		<div className="flex flex-col h-full">
+			<div className="border-b px-3.5 h-11 shrink-0 flex items-center">
+				<SectionTitle>Adjustment</SectionTitle>
+			</div>
+			{!adjust ? (
+				<div className="flex flex-col items-center gap-3 px-4 py-6 text-center">
+					<p className="text-sm text-muted-foreground text-balance">
+						Exposure, contrast, white balance and more — non-destructive, keyframable.
+					</p>
+					<Button variant="default" size="sm" onClick={() => addEffect("adjust")}>
+						Enable Adjustment
+					</Button>
+				</div>
+			) : (
+				<EffectSection {...sectionProps(adjust)} />
+			)}
+			{missing.length > 0 && (
+				<div className="flex flex-col gap-2 px-4 py-3">
+					<span className="text-xs font-medium text-muted-foreground">Color tools</span>
+					<div className="flex flex-wrap gap-1.5">
+						{missing.map((c) => (
+							<Button key={c.type} variant="outline" size="sm" onClick={() => addEffect(c.type)}>
+								+ {c.label}
+							</Button>
+						))}
+					</div>
+				</div>
+			)}
+			{colorOthers.map((effect) => (
+				<EffectSection key={effect.id} {...sectionProps(effect)} />
+			))}
+		</div>
+	);
+}
+
+/** Effect types shown in the Adjustment tab (color tools only). */
+export const COLOR_EFFECT_TYPES = ["adjust", "wheels", "filter", "lut", "hsl", "curves"];
 
 function QuickAddColor({
 	effects,
@@ -471,6 +606,19 @@ function EffectSection({
 					/>
 				) : effect.type === "lut" ? (
 					<LutPanel
+						effect={effect}
+						trackId={trackId}
+						elementId={elementId}
+						animations={animations}
+						localTime={localTime}
+						isPlayheadWithinElementRange={isPlayheadWithinElementRange}
+						renderParams={renderParams}
+						previewEffectParams={previewEffectParams}
+						patchEffectParam={patchEffectParam}
+						onCommit={onCommit}
+					/>
+				) : effect.type === "wheels" ? (
+					<WheelsPanel
 						effect={effect}
 						trackId={trackId}
 						elementId={elementId}
@@ -738,6 +886,95 @@ function LutPanel({
 				</div>
 				<Separator />
 			</div>
+		</SectionFields>
+	);
+}
+
+/**
+ * Wheels effect: 3 hue-ring pads (hue+sat, direct write) + luminance
+ * sliders with full keyframe support. Hue/sat pad drags write static
+ * values; keyframe those via panel only through lum rows in v1.
+ */
+function WheelsPanel({
+	effect,
+	trackId,
+	elementId,
+	animations,
+	localTime,
+	isPlayheadWithinElementRange,
+	renderParams,
+	previewEffectParams,
+	patchEffectParam,
+	onCommit,
+}: {
+	effect: Effect;
+	trackId: string;
+	elementId: string;
+	animations: ElementAnimations | undefined;
+	localTime: MediaTime;
+	isPlayheadWithinElementRange: boolean;
+	renderParams: ParamValues;
+	previewEffectParams: (patch: ParamValues) => void;
+	patchEffectParam: (
+		effectId: string,
+		key: string,
+		value: ParamValue,
+	) => Partial<TimelineElement>;
+	onCommit: () => void;
+}) {
+	const definition = effectsRegistry.get("wheels");
+	const lumParams = definition.params.filter((p) => p.key.endsWith(".lum"));
+	const num = (key: string, fallback: number): number => {
+		const v = renderParams[key];
+		const n = typeof v === "number" ? v : Number.parseFloat(String(v ?? fallback));
+		return Number.isFinite(n) ? n : fallback;
+	};
+
+	return (
+		<SectionFields>
+			<div className="flex flex-col gap-3.5">
+				<div className="flex items-start justify-around px-4 pt-1">
+					{WHEEL_ZONES.map((zone) => (
+						<div key={zone} className="flex flex-col items-center gap-1.5">
+							<WheelPad
+								hue={num(`wheels.${zone}.hue`, 0)}
+								sat={num(`wheels.${zone}.sat`, 0)}
+								onPreview={(hue, sat) =>
+									previewEffectParams({
+										[`wheels.${zone}.hue`]: hue,
+										[`wheels.${zone}.sat`]: sat,
+									})
+								}
+								onCommit={onCommit}
+							/>
+							<span className="text-xs text-muted-foreground">
+								{WHEEL_ZONE_LABELS[zone]}
+							</span>
+						</div>
+					))}
+				</div>
+				<Separator />
+			</div>
+			{lumParams.map((param) => (
+				<div key={param.key} className="flex flex-col gap-3.5">
+					<div className="px-4">
+						<EffectParamField
+							effect={effect}
+							trackId={trackId}
+							elementId={elementId}
+							animations={animations}
+							localTime={localTime}
+							isPlayheadWithinElementRange={isPlayheadWithinElementRange}
+							param={param}
+							baseValue={(renderParams[param.key] ?? param.default) as ParamValue}
+							previewParam={(key) => (value) => previewEffectParams({ [key]: value })}
+							patchEffectParam={patchEffectParam}
+							onCommit={onCommit}
+						/>
+					</div>
+					<Separator />
+				</div>
+			))}
 		</SectionFields>
 	);
 }

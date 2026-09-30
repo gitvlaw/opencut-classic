@@ -14,6 +14,7 @@ pub const CURVES_SHADER_ID: &str = "curves";
 pub const COLOR_FILTER_SHADER_ID: &str = "color-filter";
 pub const LUT_3D_SHADER_ID: &str = "lut-3d";
 pub const COLOR_GRADE_HSL_SHADER_ID: &str = "color-grade-hsl";
+pub const COLOR_WHEELS_SHADER_ID: &str = "color-wheels";
 
 const GAUSSIAN_BLUR_SHADER_SOURCE: &str = include_str!("shaders/gaussian_blur.wgsl");
 const COLOR_GRADE_SHADER_SOURCE: &str = include_str!("shaders/color_grade.wgsl");
@@ -22,6 +23,7 @@ const CURVES_SHADER_SOURCE: &str = include_str!("shaders/curves.wgsl");
 const COLOR_FILTER_SHADER_SOURCE: &str = include_str!("shaders/color_filter.wgsl");
 const LUT_3D_SHADER_SOURCE: &str = include_str!("shaders/lut_3d.wgsl");
 const COLOR_GRADE_HSL_SHADER_SOURCE: &str = include_str!("shaders/color_grade_hsl.wgsl");
+const COLOR_WHEELS_SHADER_SOURCE: &str = include_str!("shaders/color_wheels.wgsl");
 
 /// All shader ids supported by this pipeline version.
 /// Exposed to TS via `listEffectShaders` so the UI can drop passes the
@@ -34,6 +36,7 @@ pub const SHADER_IDS: &[&str] = &[
     COLOR_FILTER_SHADER_ID,
     LUT_3D_SHADER_ID,
     COLOR_GRADE_HSL_SHADER_ID,
+    COLOR_WHEELS_SHADER_ID,
 ];
 
 /// Number of generic data floats shared by all color shaders.
@@ -142,6 +145,7 @@ impl EffectPipeline {
             (CURVES_SHADER_ID, CURVES_SHADER_SOURCE),
             (COLOR_FILTER_SHADER_ID, COLOR_FILTER_SHADER_SOURCE),
             (COLOR_GRADE_HSL_SHADER_ID, COLOR_GRADE_HSL_SHADER_SOURCE),
+            (COLOR_WHEELS_SHADER_ID, COLOR_WHEELS_SHADER_SOURCE),
         ];
 
         let mut pipelines = HashMap::with_capacity(shaders.len() + 1);
@@ -468,7 +472,8 @@ fn pack_effect_uniforms(
         | CURVES_SHADER_ID
         | COLOR_FILTER_SHADER_ID
         | LUT_3D_SHADER_ID
-        | COLOR_GRADE_HSL_SHADER_ID => pack_data_uniforms(pass, width, height),
+        | COLOR_GRADE_HSL_SHADER_ID
+        | COLOR_WHEELS_SHADER_ID => pack_data_uniforms(pass, width, height),
         _ => Err(EffectsError::UnknownEffectShader {
             shader: pass.shader.clone(),
         }),
