@@ -1,9 +1,11 @@
 import { ShaderUpscaler } from "./shader-upscaler";
 import "./ai-upscaler";
+import { resolveAiUpscaler } from "./registry";
 import type { Upscaler, UpscaleMethod } from "./types";
 
 export * from "./types";
 export { ShaderUpscaler } from "./shader-upscaler";
+export { registerAiUpscaler, resolveAiUpscaler } from "./registry";
 
 /**
  * Backend factory. "ai" is served by AiUpscaler once its worker is ready
@@ -17,20 +19,5 @@ export function resolveUpscaler(method: UpscaleMethod): Upscaler {
 		case "shader":
 		default:
 			return new ShaderUpscaler();
-	}
-}
-
-// Overridden by ai-upscaler.ts (side-effect import) when bundled.
-let aiFactory: (() => Upscaler) | null = null;
-
-export function registerAiUpscaler(factory: () => Upscaler): void {
-	aiFactory = factory;
-}
-
-function resolveAiUpscaler(): Upscaler | null {
-	try {
-		return aiFactory?.() ?? null;
-	} catch {
-		return null;
 	}
 }

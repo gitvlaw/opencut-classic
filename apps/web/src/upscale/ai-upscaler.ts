@@ -1,4 +1,4 @@
-import { registerAiUpscaler } from "./index";
+import { registerAiUpscaler } from "./registry";
 import { upscaleService } from "./service";
 import { ShaderUpscaler } from "./shader-upscaler";
 import { resize2d, snapshotToOffscreen } from "./types";
