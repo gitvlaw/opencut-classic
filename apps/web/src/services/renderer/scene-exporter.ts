@@ -89,12 +89,15 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		this.quality = quality;
 		this.shouldIncludeAudio = shouldIncludeAudio ?? false;
 		this.audioBuffer = audioBuffer;
-		// Only upscale to strictly larger targets; otherwise stay 1:1.
+		// Upscale to strictly larger targets; AI enhance may also run at
+		// canvas size (2x internal, then fit back) for detail + denoise.
 		if (
 			upscale &&
-			(upscale.width > width || upscale.height > height) &&
 			upscale.width > 0 &&
-			upscale.height > 0
+			upscale.height > 0 &&
+			(upscale.width > width ||
+				upscale.height > height ||
+				upscale.method === "ai")
 		) {
 			this.upscale = upscale;
 		}

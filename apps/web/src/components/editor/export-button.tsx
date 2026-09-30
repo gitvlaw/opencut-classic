@@ -118,15 +118,25 @@ function ExportPopover({
 	);
 	const [upscaleTo1080, setUpscaleTo1080] = useState(false);
 	const [upscaleMethod, setUpscaleMethod] = useState<UpscaleMethod>("shader");
+	const [aiEnhance, setAiEnhance] = useState(false);
 
 	const handleExport = async () => {
 		if (!activeProject) return;
 
 		const canvasSize = activeProject.settings.canvasSize;
+		const canUpscale = shouldOfferUpscale(canvasSize.width, canvasSize.height);
 		const target =
-			upscaleTo1080 && shouldOfferUpscale(canvasSize.width, canvasSize.height)
+			upscaleTo1080 && canUpscale
 				? compute1080pTarget(canvasSize.width, canvasSize.height)
 				: null;
+		// AI enhance also works at canvas resolution (2x internal, then fit
+		// back) — denoise + detail even without upscaling.
+		const wantEnhance = !!target || (aiEnhance && isAiUpscaleSupported());
+		const method: UpscaleMethod = target
+			? isAiUpscaleSupported()
+				? upscaleMethod
+				: "shader"
+			: "ai";
 
 		const result = await editor.project.export({
 			options: {
@@ -134,12 +144,12 @@ function ExportPopover({
 				quality,
 				fps: activeProject.settings.fps,
 				includeAudio: shouldIncludeAudio,
-				...(target
+				...(wantEnhance
 					? {
 							upscale: {
-								width: target.width,
-								height: target.height,
-								method: isAiUpscaleSupported() ? upscaleMethod : "shader",
+								width: target?.width ?? canvasSize.width,
+								height: target?.height ?? canvasSize.height,
+								method,
 							},
 						}
 					: {}),
@@ -252,6 +262,16 @@ function ExportPopover({
 													</Label>
 												</div>
 											</RadioGroup>
+											{activeProject &&
+												!shouldOfferUpscale(
+													activeProject.settings.canvasSize.width,
+													activeProject.settings.canvasSize.height,
+												) && (
+													<p className="text-muted-foreground mt-1 text-xs">
+														Canvas is already 1080p or higher — no upscale
+														needed. Use AI enhance below for extra detail.
+													</p>
+												)}
 											{upscaleTo1080 && (
 												<div className="mt-2 flex flex-col gap-2 pl-6">
 													<RadioGroup
@@ -291,6 +311,22 @@ function ExportPopover({
 														</p>
 													)}
 												</div>
+											)}
+											<div className="mt-2 flex items-center space-x-2">
+												<Checkbox
+													id="ai-enhance"
+													checked={aiEnhance}
+													disabled={!isAiUpscaleSupported()}
+													onCheckedChange={(checked) => setAiEnhance(!!checked)}
+												/>
+												<Label htmlFor="ai-enhance">
+													AI enhance (detail + denoise, any resolution)
+												</Label>
+											</div>
+											{!isAiUpscaleSupported() && (
+												<p className="text-muted-foreground text-xs">
+													AI enhance needs a WebGPU browser (Chrome/Edge 113+).
+												</p>
 											)}
 										</SectionContent>
 									</Section>
