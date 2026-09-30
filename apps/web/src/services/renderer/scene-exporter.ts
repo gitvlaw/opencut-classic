@@ -65,6 +65,13 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 	private upscale?: UpscaleRequest;
 	private upscaler: Upscaler | null = null;
 	private feedCanvas: HTMLCanvasElement | null = null;
+	/**
+	 * Persistent 2D frame canvas at canvas size. Every export frame is
+	 * rendered into it via renderToCanvas() and the encoder/upscaler only
+	 * ever read from 2D canvases — never from the presented WebGL canvas,
+	 * whose drawing buffer may already be cleared (transparent black).
+	 */
+	private frameCanvas: HTMLCanvasElement | null = null;
 
 	private isCancelled = false;
 
@@ -108,10 +115,10 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		this.upscaler?.dispose?.();
 	}
 
-	/** Canvas the encoder reads. Upscaled copy when requested, else live output. */
+	/** Canvas the encoder reads. Upscaled copy when requested, else the 2D frame. */
 	private getFeedCanvas(): HTMLCanvasElement {
 		if (!this.upscale) {
-			return this.renderer.getOutputCanvas();
+			return this.getFrameCanvas();
 		}
 		if (!this.feedCanvas) {
 			this.feedCanvas = document.createElement("canvas");
@@ -121,20 +128,55 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		return this.feedCanvas;
 	}
 
-	/** Resample the just-rendered frame into the feed canvas (no-op 1:1). */
+	private getFrameCanvas(): HTMLCanvasElement {
+		if (!this.frameCanvas) {
+			this.frameCanvas = document.createElement("canvas");
+			this.frameCanvas.width = this.renderer.width;
+			this.frameCanvas.height = this.renderer.height;
+		}
+		return this.frameCanvas;
+	}
+
+	/** Resample the just-rendered frame into the feed canvas. */
 	private async feedFrame(): Promise<void> {
-		if (!this.upscale || !this.feedCanvas) return;
+		if (!this.upscale || !this.feedCanvas || !this.frameCanvas) return;
 		if (!this.upscaler) {
 			this.upscaler = resolveUpscaler(this.upscale.method);
 		}
 		const upscaled = await this.upscaler.upscale(
-			this.renderer.getOutputCanvas(),
+			this.getFrameCanvas(),
 			{ width: this.upscale.width, height: this.upscale.height },
 		);
 		const ctx = this.feedCanvas.getContext("2d");
 		if (!ctx) throw new Error("Failed to get feed canvas context");
 		ctx.clearRect(0, 0, this.feedCanvas.width, this.feedCanvas.height);
 		ctx.drawImage(upscaled, 0, 0, this.feedCanvas.width, this.feedCanvas.height);
+	}
+
+	/**
+	 * Fail loud instead of encoding a black file: a fully transparent
+	 * first frame means frame capture broke (never legitimate — the
+	 * compositor clears opaque). Genuinely black content still has
+	 * alpha 255 and passes.
+	 */
+	private assertFrameNotBlank(canvas: HTMLCanvasElement): void {
+		const ctx = canvas.getContext("2d", { willReadFrequently: true });
+		if (!ctx) return;
+		let img: ImageData;
+		try {
+			img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+		} catch {
+			return;
+		}
+		const d = img.data;
+		const step = 4099 * 4;
+		for (let i = 3; i < d.length; i += step) {
+			if ((d[i] ?? 0) > 8) return;
+		}
+		throw new Error(
+			"Export rendered a blank (fully transparent) frame — frame capture failed. " +
+				"If this persists, export without upscale/AI and report the project setup.",
+		);
 	}
 
 	async export({
@@ -202,7 +244,14 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 
 			const timeTicks = i * ticksPerFrame;
 			const timeSeconds = mediaTimeToSeconds({ time: timeTicks });
-			await this.renderer.render({ node: rootNode, time: timeTicks });
+			await this.renderer.renderToCanvas({
+				node: rootNode,
+				time: timeTicks,
+				targetCanvas: this.getFrameCanvas(),
+			});
+			if (i === 0) {
+				this.assertFrameNotBlank(this.getFrameCanvas());
+			}
 			await this.feedFrame();
 			await videoSource.add(timeSeconds, 1 / fpsFloat);
 
