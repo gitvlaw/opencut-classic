@@ -100,8 +100,12 @@ export const curvesEffectDefinition: EffectDefinition = {
 			options: [
 				{ value: "custom", label: "Custom" },
 				{ value: "s-curve", label: "S-Curve (contrast)" },
+				{ value: "portrait", label: "Portrait (soft + warm)" },
+				{ value: "landscape", label: "Landscape (punchy)" },
 				{ value: "lift-shadows", label: "Lift shadows" },
 				{ value: "fade-film", label: "Film fade" },
+				{ value: "matte", label: "Matte (strong fade)" },
+				{ value: "xprocess", label: "Cross process" },
 			],
 		},
 	],
@@ -116,16 +120,28 @@ export const curvesEffectDefinition: EffectDefinition = {
 	},
 };
 
-/** Named 16-point presets (y values). */
+/** Named 16-point presets (y values, clamped 0..1). */
 export function curvePreset(name: string): Record<CurveChannel, number[]> {
 	const id = identityCurve();
+	const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+	const at = (i: number) => i / (CURVE_POINTS - 1);
+	const sCurve = (strength: number) =>
+		id.map((_, i) => clamp01(at(i) + Math.sin((at(i) - 0.5) * Math.PI) * strength));
 	switch (name) {
 		case "s-curve": {
-			const s = id.map((_, i) => {
-				const x = i / 15;
-				return Math.min(1, Math.max(0, x + Math.sin((x - 0.5) * Math.PI) * 0.08));
-			});
-			return { master: s, red: id, green: id, blue: id };
+			return { master: sCurve(0.08), red: id, green: id, blue: id };
+		}
+		case "portrait": {
+			// Soft contrast + warm shadows (red lifted, blue dipped low).
+			const red = id.map((_, i) => clamp01(at(i) + 0.03 * (1 - at(i)) ** 2));
+			const blue = id.map((_, i) => clamp01(at(i) - 0.02 * (1 - at(i)) ** 2));
+			return { master: sCurve(0.05), red, green: id, blue };
+		}
+		case "landscape": {
+			// Punchy contrast + cool open shadows.
+			const blue = id.map((_, i) => clamp01(at(i) + 0.03 * (1 - at(i))));
+			const red = id.map((_, i) => clamp01(at(i) + 0.02 * at(i) ** 2));
+			return { master: sCurve(0.11), red, green: id, blue };
 		}
 		case "lift-shadows": {
 			const m = id.map((_, i) => Math.min(1, i / 15 + 0.08 * (1 - i / 15)));
@@ -134,6 +150,16 @@ export function curvePreset(name: string): Record<CurveChannel, number[]> {
 		case "fade-film": {
 			const m = id.map((_, i) => 0.08 + (i / 15) * 0.84);
 			return { master: m, red: id, green: id, blue: id };
+		}
+		case "matte": {
+			const m = id.map((_, i) => 0.12 + (i / 15) * 0.76);
+			return { master: m, red: id, green: id, blue: id };
+		}
+		case "xprocess": {
+			// Cross-processed film: green shadows, blue highlight dip.
+			const green = id.map((_, i) => clamp01(at(i) + 0.05 * (1 - at(i)) ** 2));
+			const blue = id.map((_, i) => clamp01(at(i) - 0.05 * at(i) ** 2));
+			return { master: sCurve(0.03), red: id, green, blue };
 		}
 		default:
 			return { master: id, red: id, green: id, blue: id };

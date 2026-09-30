@@ -308,15 +308,18 @@ export class TimelineManager {
 		trackId,
 		elementId,
 		effectType,
+		initialParams,
 	}: {
 		trackId: string;
 		elementId: string;
 		effectType: string;
+		initialParams?: ParamValues;
 	}): string {
 		const command = new AddClipEffectCommand({
 			trackId,
 			elementId,
 			effectType,
+			initialParams,
 		});
 		this.editor.command.execute({ command });
 		return command.getEffectId() ?? "";

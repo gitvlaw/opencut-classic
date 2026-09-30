@@ -144,6 +144,74 @@ export function getFilterPreset(id: string): FilterPreset {
 	return FILTER_PRESETS.find((p) => p.id === id) ?? FILTER_PRESETS[0]!;
 }
 
+export interface FilterSnapshot {
+	v: 1;
+	preset: string;
+	look: [number, number, number, number, number, number, number];
+	matrix: number[];
+	lift: [number, number, number];
+	gain: [number, number, number];
+}
+
+/**
+ * Freeze a preset's look data as JSON. Stored on the effect instance so
+ * later library edits never change already-graded projects (versioning).
+ */
+export function buildFilterSnapshot(presetId: string): string {
+	const p = getFilterPreset(presetId);
+	const snapshot: FilterSnapshot = {
+		v: 1,
+		preset: p.id,
+		look: [...p.look] as FilterSnapshot["look"],
+		matrix: [...p.matrix],
+		lift: [...p.lift] as FilterSnapshot["lift"],
+		gain: [...p.gain] as FilterSnapshot["gain"],
+	};
+	return JSON.stringify(snapshot);
+}
+
+function readFilterSnapshot(params: ParamValues): FilterSnapshot | null {
+	const raw = params.snapshot;
+	if (typeof raw !== "string" || !raw) return null;
+	try {
+		const s = JSON.parse(raw) as Partial<FilterSnapshot>;
+		if (
+			s?.v === 1 &&
+			Array.isArray(s.look) && s.look.length === 7 &&
+			Array.isArray(s.matrix) && s.matrix.length === 9 &&
+			Array.isArray(s.lift) && s.lift.length === 3 &&
+			Array.isArray(s.gain) && s.gain.length === 3
+		) {
+			return s as FilterSnapshot;
+		}
+	} catch {
+		// corrupt snapshot — fall back to the live definition
+	}
+	return null;
+}
+
+function snapshotToData(snapshot: FilterSnapshot, timeSeconds: number): number[] {
+	const data = new Array(64).fill(0);
+	data[0] = 1; // intensity applied by caller via params
+	const [warmth, tint, contrast, saturation, fade, grain, vignette] = snapshot.look;
+	data[1] = warmth!;
+	data[2] = tint!;
+	data[3] = contrast!;
+	data[4] = saturation!;
+	data[5] = fade!;
+	data[6] = grain!;
+	data[7] = vignette!;
+	for (let i = 0; i < 9; i++) data[8 + i] = snapshot.matrix[i] ?? (i % 4 === 0 ? 1 : 0);
+	data[17] = snapshot.lift[0]!;
+	data[18] = snapshot.lift[1]!;
+	data[19] = snapshot.lift[2]!;
+	data[20] = snapshot.gain[0]!;
+	data[21] = snapshot.gain[1]!;
+	data[22] = snapshot.gain[2]!;
+	data[23] = timeSeconds;
+	return data;
+}
+
 function num(params: ParamValues, key: string, fallback = 0): number {
 	const v = params[key];
 	const n = typeof v === "number" ? v : Number.parseFloat(String(v ?? fallback));
@@ -178,8 +246,18 @@ export function filterParamsToData(effectParams: ParamValues, timeSeconds = 0): 
 
 export function buildFilterPasses(effectParams: ParamValues, timeSeconds = 0): EffectPass[] {
 	if (String(effectParams.preset ?? "none") === "none") return [];
-	const data = filterParamsToData(effectParams, timeSeconds);
-	if (data[0]! <= 0.001) return [];
+	const intensity = Math.min(
+		1,
+		Math.max(0, num(effectParams, "intensity", 100) / 100),
+	);
+	if (intensity <= 0.001) return [];
+	// Prefer the frozen snapshot (project stability); fall back to the
+	// live library definition for legacy effects without one.
+	const snapshot = readFilterSnapshot(effectParams);
+	const data = snapshot
+		? snapshotToData(snapshot, timeSeconds)
+		: filterParamsToData(effectParams, timeSeconds);
+	data[0] = intensity;
 	return [{ shader: COLOR_FILTER_SHADER, uniforms: { u_data: data } }];
 }
 

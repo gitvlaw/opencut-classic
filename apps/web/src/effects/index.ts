@@ -1,6 +1,7 @@
 import { generateUUID } from "@/utils/id";
 import { buildDefaultParamValues } from "@/params/registry";
 import { effectsRegistry } from "./registry";
+import { buildFilterSnapshot } from "./definitions/filter";
 import type { ParamValues } from "@/params";
 import type { Effect, EffectDefinition, EffectPass } from "@/effects/types";
 import { VISUAL_ELEMENT_TYPES } from "@/timeline";
@@ -39,6 +40,12 @@ export function buildDefaultEffectInstance({
 }): Effect {
 	const definition = effectsRegistry.get(effectType);
 	const params: ParamValues = buildDefaultParamValues(definition.params);
+
+	// Freeze the filter look at insert time — later library edits must not
+	// re-grade already-saved projects (preset versioning).
+	if (effectType === "filter") {
+		params.snapshot = buildFilterSnapshot(String(params.preset ?? "none"));
+	}
 
 	return {
 		id: generateUUID(),

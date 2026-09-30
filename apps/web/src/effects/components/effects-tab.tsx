@@ -42,6 +42,13 @@ import {
 	type CurveChannel,
 } from "@/effects/definitions/curves";
 import type { LutEntry } from "@/lut/lut-registry";
+import {
+	deleteGradePreset,
+	listGradePresets,
+	renameGradePreset,
+	saveGradePreset,
+	type UserGradePreset,
+} from "@/effects/user-presets";
 import { WheelPad } from "@/effects/components/color-wheels";
 import { FilterPanel } from "@/effects/components/filter-panel";
 import { WHEEL_ZONES, WHEEL_ZONE_LABELS } from "@/effects/definitions/wheels";
@@ -411,6 +418,20 @@ export function AdjustmentTab({
 					</div>
 				</div>
 			)}
+			<MyGradePresets
+				adjust={adjust ?? null}
+				getRenderParams={getRenderParams}
+				buildPreviewEffectParams={buildPreviewEffectParams}
+				commit={commit}
+				onEnsureAdjust={(preset) => {
+					editor.timeline.addClipEffect({
+						trackId,
+						elementId: element.id,
+						effectType: "adjust",
+						initialParams: preset.params,
+					});
+				}}
+			/>
 			{colorOthers.map((effect) => (
 				<EffectSection key={effect.id} {...sectionProps(effect)} />
 			))}
@@ -420,6 +441,133 @@ export function AdjustmentTab({
 
 /** Effect types shown in the Adjustment tab (color tools only). */
 export const COLOR_EFFECT_TYPES = ["adjust", "wheels", "filter", "lut", "hsl", "curves"];
+
+/**
+ * User-saved grades (localStorage). Apply writes the stored Adjust values
+ * onto the clip — creating the Adjust effect with them when missing.
+ */
+function MyGradePresets({
+	adjust,
+	getRenderParams,
+	buildPreviewEffectParams,
+	commit,
+	onEnsureAdjust,
+}: {
+	adjust: Effect | null;
+	getRenderParams: ({ effectId }: { effectId: string }) => ParamValues;
+	buildPreviewEffectParams: (effectId: string) => (patch: ParamValues) => void;
+	commit: () => void;
+	onEnsureAdjust: (preset: UserGradePreset) => void;
+}) {
+	const [, force] = useState(0);
+	const [name, setName] = useState("");
+	const [renamingId, setRenamingId] = useState<string | null>(null);
+	const [renameValue, setRenameValue] = useState("");
+	const presets = listGradePresets();
+
+	const refresh = () => force((v) => v + 1);
+
+	const handleSave = () => {
+		if (!adjust || !name.trim()) return;
+		saveGradePreset(name, getRenderParams({ effectId: adjust.id }));
+		setName("");
+		refresh();
+	};
+
+	const handleApply = (preset: UserGradePreset) => {
+		if (adjust) {
+			buildPreviewEffectParams(adjust.id)(preset.params);
+			commit();
+		} else {
+			onEnsureAdjust(preset);
+		}
+	};
+
+	return (
+		<div className="flex flex-col gap-2 px-4 py-3">
+			<span className="text-xs font-medium text-muted-foreground">My presets</span>
+			{adjust && (
+				<div className="flex gap-1.5">
+					<input
+						value={name}
+						onChange={(e) => setName(e.target.value)}
+						placeholder="Preset name…"
+						maxLength={60}
+						className="h-8 flex-1 rounded border bg-background px-2 text-sm outline-none placeholder:text-muted-foreground focus:border-primary"
+					/>
+					<Button variant="outline" size="sm" disabled={!name.trim()} onClick={handleSave}>
+						Save
+					</Button>
+				</div>
+			)}
+			{presets.length === 0 ? (
+				<p className="text-xs text-muted-foreground">
+					{adjust
+						? "No saved grades yet — name the current look above."
+						: "Enable Adjustment first, then save its look here."}
+				</p>
+			) : (
+				<ul className="flex flex-col gap-1">
+					{presets.map((preset) => (
+						<li
+							key={preset.id}
+							className="group flex items-center gap-1 rounded px-2 py-1 hover:bg-accent"
+						>
+							{renamingId === preset.id ? (
+								<input
+									autoFocus
+									value={renameValue}
+									onChange={(e) => setRenameValue(e.target.value)}
+									onBlur={() => {
+										if (renameGradePreset(preset.id, renameValue)) refresh();
+										setRenamingId(null);
+									}}
+									onKeyDown={(e) => {
+										if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+										if (e.key === "Escape") setRenamingId(null);
+									}}
+									maxLength={60}
+									className="h-6 flex-1 rounded border bg-background px-1 text-sm outline-none"
+								/>
+							) : (
+								<button
+									type="button"
+									className="flex-1 truncate text-left text-sm"
+									onClick={() => handleApply(preset)}
+									title="Apply to this clip"
+								>
+									{preset.name}
+								</button>
+							)}
+							<Button
+								variant="ghost"
+								size="sm"
+								className="h-6 px-1.5 text-xs opacity-0 group-hover:opacity-100"
+								onClick={() => {
+									setRenamingId(preset.id);
+									setRenameValue(preset.name);
+								}}
+							>
+								Rename
+							</Button>
+							<Button
+								variant="ghost"
+								size="sm"
+								className="h-6 px-1.5 text-xs opacity-0 group-hover:opacity-100"
+								onClick={() => {
+									deleteGradePreset(preset.id);
+									refresh();
+								}}
+							>
+								Delete
+							</Button>
+						</li>
+					))}
+				</ul>
+			)}
+		</div>
+	);
+}
 
 function QuickAddColor({
 	effects,

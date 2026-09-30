@@ -13,7 +13,7 @@ import type { MediaTime } from "@/wasm";
 import { effectsRegistry } from "@/effects";
 import { useKeyframedParamProperty } from "@/components/editor/panels/properties/hooks/use-keyframed-param-property";
 import { effectPreviewService } from "@/services/renderer/effect-preview";
-import { FILTER_PRESETS } from "@/effects/definitions/filter";
+import { FILTER_PRESETS, buildFilterSnapshot } from "@/effects/definitions/filter";
 
 const THUMB_SIZE = 96;
 
@@ -129,7 +129,12 @@ export function FilterPanel({
 						presetName={preset.name}
 						active={activePreset === preset.id}
 						onPick={() => {
-							previewEffectParams({ preset: preset.id });
+							// Re-freeze the look: the snapshot versions the
+							// preset against future library edits.
+							previewEffectParams({
+								preset: preset.id,
+								snapshot: buildFilterSnapshot(preset.id),
+							});
 							onCommit();
 						}}
 					/>
