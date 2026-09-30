@@ -2,6 +2,7 @@
 
 import * as ort from "onnxruntime-web";
 import { computeTiles, tileWeight } from "./tiling";
+import { packHwcToNchw, unpackNchwToHwc } from "./tensor";
 import type {
 	UpscaleInboundMessage,
 	UpscaleOutboundMessage,
@@ -98,26 +99,30 @@ async function handleUpscaleImage(
 			}
 
 			// Crop HWC float tile -> NCHW tensor.
-			const plane = tile.w * tile.h;
-			const nchw = new Float32Array(3 * plane);
+			const cropped = new Float32Array(tile.w * tile.h * 3);
 			for (let y = 0; y < tile.h; y++) {
 				for (let x = 0; x < tile.w; x++) {
 					const src = ((tile.y + y) * width + (tile.x + x)) * 3;
-					const px = y * tile.w + x;
-					nchw[px] = data[src] ?? 0;
-					nchw[plane + px] = data[src + 1] ?? 0;
-					nchw[2 * plane + px] = data[src + 2] ?? 0;
+					const px = (y * tile.w + x) * 3;
+					cropped[px] = data[src] ?? 0;
+					cropped[px + 1] = data[src + 1] ?? 0;
+					cropped[px + 2] = data[src + 2] ?? 0;
 				}
 			}
+			const nchw = packHwcToNchw(cropped, tile.w, tile.h);
 
 			const feeds: Record<string, ort.Tensor> = {};
 			feeds[inputName] = new ort.Tensor("float32", nchw, [1, 3, tile.h, tile.w]);
 			const results = await session.run(feeds);
-			const out = results[outputName]?.data as Float32Array | undefined;
+			const outputTensor = results[outputName];
+			const out = outputTensor?.data as Float32Array | undefined;
 			if (!out) throw new Error("Upscale model returned no output");
-
 			const oh = tile.h * UPSCALE_FACTOR;
 			const ow = tile.w * UPSCALE_FACTOR;
+			// NCHW planar output, dims-validated (never silently mosaiced).
+			const dims = outputTensor?.dims as readonly number[] | undefined;
+			if (!dims) throw new Error("Upscale model returned output without dims");
+			const hwc = unpackNchwToHwc(out, ow, oh, dims);
 			for (let y = 0; y < oh; y++) {
 				for (let x = 0; x < ow; x++) {
 					const sx = Math.min(tile.w - 1, Math.floor(x / UPSCALE_FACTOR));
@@ -126,9 +131,9 @@ async function handleUpscaleImage(
 					if (w <= 0) continue;
 					const gx = (tile.y * UPSCALE_FACTOR + y) * outW + (tile.x * UPSCALE_FACTOR + x);
 					const o = (y * ow + x) * 3;
-					acc[gx * 3] += (out[o] ?? 0) * w;
-					acc[gx * 3 + 1] += (out[o + 1] ?? 0) * w;
-					acc[gx * 3 + 2] += (out[o + 2] ?? 0) * w;
+					acc[gx * 3] += (hwc[o] ?? 0) * w;
+					acc[gx * 3 + 1] += (hwc[o + 1] ?? 0) * w;
+					acc[gx * 3 + 2] += (hwc[o + 2] ?? 0) * w;
 					weights[gx] += w;
 				}
 			}
