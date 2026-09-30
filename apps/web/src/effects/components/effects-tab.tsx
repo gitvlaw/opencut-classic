@@ -43,6 +43,7 @@ import {
 } from "@/effects/definitions/curves";
 import type { LutEntry } from "@/lut/lut-registry";
 import { WheelPad } from "@/effects/components/color-wheels";
+import { FilterPanel } from "@/effects/components/filter-panel";
 import { WHEEL_ZONES, WHEEL_ZONE_LABELS } from "@/effects/definitions/wheels";
 
 export function StandaloneEffectTab({
@@ -619,6 +620,19 @@ function EffectSection({
 					/>
 				) : effect.type === "wheels" ? (
 					<WheelsPanel
+						effect={effect}
+						trackId={trackId}
+						elementId={elementId}
+						animations={animations}
+						localTime={localTime}
+						isPlayheadWithinElementRange={isPlayheadWithinElementRange}
+						renderParams={renderParams}
+						previewEffectParams={previewEffectParams}
+						patchEffectParam={patchEffectParam}
+						onCommit={onCommit}
+					/>
+				) : effect.type === "filter" ? (
+					<FilterPanel
 						effect={effect}
 						trackId={trackId}
 						elementId={elementId}

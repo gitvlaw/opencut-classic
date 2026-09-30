@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { buildColorGradePasses, gradeParamsToData } from "../definitions/adjust";
-import { buildFilterPasses, filterParamsToData } from "../definitions/filter";
+import { buildFilterPasses, filterParamsToData, FILTER_PRESETS } from "../definitions/filter";
 
 const identity = {
 	exposure: 0,
@@ -59,5 +59,25 @@ describe("filter grain time seed", () => {
 		const passes = buildFilterPasses({ preset: "memory", intensity: 100 }, 7.25);
 		expect(passes.length).toBe(1);
 		expect((passes[0]!.uniforms.u_data as number[])[23]).toBeCloseTo(7.25, 5);
+	});
+});
+
+describe("filter presets", () => {
+	it("carries per-channel gain at data[20..22] (shader multiplies vec3)", () => {
+		const data = filterParamsToData({ preset: "sunset", intensity: 100 });
+		expect(data[20]).toBeCloseTo(1.03, 5);
+		expect(data[21]).toBeCloseTo(0.99, 5);
+		expect(data[22]).toBeCloseTo(0.94, 5);
+	});
+
+	it("noir uses BT.709 luma rows", () => {
+		const data = filterParamsToData({ preset: "noir", intensity: 100 });
+		expect(data.slice(8, 11)).toEqual([0.2126, 0.7152, 0.0722]);
+	});
+
+	it("includes the new distinct looks", () => {
+		const ids = FILTER_PRESETS.map((p) => p.id);
+		expect(ids).toContain("teal-orange");
+		expect(ids).toContain("moody");
 	});
 });

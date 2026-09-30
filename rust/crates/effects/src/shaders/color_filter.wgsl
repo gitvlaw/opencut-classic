@@ -40,7 +40,9 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4f {
         return src;
     }
 
-    var rgb = src.rgb * d[20] + vec3f(d[17], d[18], d[19]);
+    // Per-channel gain + lift (must be a vec3 multiply — a scalar here
+    // would apply the red gain to all channels and drop G/B).
+    var rgb = src.rgb * vec3f(d[20], d[21], d[22]) + vec3f(d[17], d[18], d[19]);
     // warmth/tint
     rgb.r = rgb.r * (1.0 + d[1] * 0.10);
     rgb.b = rgb.b * (1.0 - d[1] * 0.10);
