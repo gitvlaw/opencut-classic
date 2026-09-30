@@ -1,6 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 
-use effects::{ApplyEffectsOptions, EffectPass, UniformValue};
+use effects::{ApplyEffectsOptions, EffectPass, UniformValue, UpscaleOptions};
 use gpu::wgpu;
 use js_sys::Object;
 use serde::Deserialize;
@@ -8,8 +8,8 @@ use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
 
 use crate::compositor::with_compositor_mut;
 use crate::gpu::{
-    import_canvas_texture, read_offscreen_canvas_property, read_serde_property, read_u32_property,
-    render_texture_to_canvas, with_gpu_runtime, with_gpu_runtime_mut,
+    import_canvas_texture, read_offscreen_canvas_property, read_property, read_serde_property,
+    read_u32_property, render_texture_to_canvas, with_gpu_runtime, with_gpu_runtime_mut,
 };
 
 struct ApplyEffectPassesOptions {
@@ -98,6 +98,47 @@ fn parse_apply_effect_passes_options(value: JsValue) -> Result<ApplyEffectPasses
         width: read_u32_property(&object, "width")?,
         height: read_u32_property(&object, "height")?,
         passes: read_serde_property(&object, "passes")?,
+    })
+}
+
+/// Resample a canvas into a different size (up or down).
+/// mode: 0 bilinear, 1 bicubic, 2 lanczos3.
+#[wasm_bindgen(js_name = upscaleImage)]
+pub fn upscale_image(options: JsValue) -> Result<wgpu::web_sys::OffscreenCanvas, JsValue> {
+    let object: Object = options
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("upscaleImage expects an options object"))?;
+    let source = read_offscreen_canvas_property(&object, "source")?;
+    let src_width = read_u32_property(&object, "srcWidth")?;
+    let src_height = read_u32_property(&object, "srcHeight")?;
+    let dst_width = read_u32_property(&object, "dstWidth")?;
+    let dst_height = read_u32_property(&object, "dstHeight")?;
+    let mode_value = read_property(&object, "mode")?;
+    let mode = mode_value.as_f64().unwrap_or(1.0) as f32;
+
+    with_gpu_runtime(|runtime| {
+        let source_texture = import_canvas_texture(
+            &runtime.context,
+            &source,
+            src_width,
+            src_height,
+            "upscale-input-texture",
+        );
+        let result_texture = runtime
+            .effects
+            .upscale(
+                &runtime.context,
+                UpscaleOptions {
+                    source: &source_texture,
+                    src_width,
+                    src_height,
+                    dst_width,
+                    dst_height,
+                    mode,
+                },
+            )
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        render_texture_to_canvas(&runtime.context, &result_texture, dst_width, dst_height)
     })
 }
 

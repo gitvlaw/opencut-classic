@@ -34,6 +34,12 @@ import {
 } from "@/components/section";
 import { useEditor } from "@/editor/use-editor";
 import { DEFAULT_EXPORT_OPTIONS } from "@/export/defaults";
+import {
+	compute1080pTarget,
+	shouldOfferUpscale,
+	type UpscaleMethod,
+} from "@/upscale";
+import { isAiUpscaleSupported } from "@/upscale/ai-capability";
 
 function isExportFormat(value: string): value is ExportFormat {
 	return EXPORT_FORMAT_VALUES.some((formatValue) => formatValue === value);
@@ -110,9 +116,17 @@ function ExportPopover({
 	const [shouldIncludeAudio, setShouldIncludeAudio] = useState<boolean>(
 		DEFAULT_EXPORT_OPTIONS.includeAudio ?? true,
 	);
+	const [upscaleTo1080, setUpscaleTo1080] = useState(false);
+	const [upscaleMethod, setUpscaleMethod] = useState<UpscaleMethod>("shader");
 
 	const handleExport = async () => {
 		if (!activeProject) return;
+
+		const canvasSize = activeProject.settings.canvasSize;
+		const target =
+			upscaleTo1080 && shouldOfferUpscale(canvasSize.width, canvasSize.height)
+				? compute1080pTarget(canvasSize.width, canvasSize.height)
+				: null;
 
 		const result = await editor.project.export({
 			options: {
@@ -120,6 +134,15 @@ function ExportPopover({
 				quality,
 				fps: activeProject.settings.fps,
 				includeAudio: shouldIncludeAudio,
+				...(target
+					? {
+							upscale: {
+								width: target.width,
+								height: target.height,
+								method: isAiUpscaleSupported() ? upscaleMethod : "shader",
+							},
+						}
+					: {}),
 			},
 		});
 
@@ -193,6 +216,82 @@ function ExportPopover({
 													</Label>
 												</div>
 											</RadioGroup>
+										</SectionContent>
+									</Section>
+
+									<Section collapsible defaultOpen={false}>
+										<SectionHeader>
+											<SectionTitle>Resolution</SectionTitle>
+										</SectionHeader>
+										<SectionContent>
+											<RadioGroup
+												value={upscaleTo1080 ? "hd" : "original"}
+												onValueChange={(value) => setUpscaleTo1080(value === "hd")}
+											>
+												<div className="flex items-center space-x-2">
+													<RadioGroupItem value="original" id="res-original" />
+													<Label htmlFor="res-original">
+														Original ({activeProject?.settings.canvasSize.width}×
+														{activeProject?.settings.canvasSize.height})
+													</Label>
+												</div>
+												<div className="flex items-center space-x-2">
+													<RadioGroupItem
+														value="hd"
+														id="res-hd"
+														disabled={
+															!activeProject ||
+															!shouldOfferUpscale(
+																activeProject.settings.canvasSize.width,
+																activeProject.settings.canvasSize.height,
+															)
+														}
+													/>
+													<Label htmlFor="res-hd">
+														1080p HD — upscale on export
+													</Label>
+												</div>
+											</RadioGroup>
+											{upscaleTo1080 && (
+												<div className="mt-2 flex flex-col gap-2 pl-6">
+													<RadioGroup
+														value={upscaleMethod}
+														onValueChange={(value) => {
+															if (value === "shader" || value === "ai") {
+																setUpscaleMethod(value);
+															}
+														}}
+													>
+														<div className="flex items-center space-x-2">
+															<RadioGroupItem value="shader" id="up-shader" />
+															<Label htmlFor="up-shader">
+																Fast (Lanczos, realtime)
+															</Label>
+														</div>
+														<div className="flex items-center space-x-2">
+															<RadioGroupItem
+																value="ai"
+																id="up-ai"
+																disabled={!isAiUpscaleSupported()}
+															/>
+															<Label htmlFor="up-ai">
+																AI enhance (slower, best detail)
+															</Label>
+														</div>
+													</RadioGroup>
+													{!isAiUpscaleSupported() && (
+														<p className="text-muted-foreground text-xs">
+															AI enhance needs a WebGPU browser (Chrome/Edge 113+).
+														</p>
+													)}
+													{isAiUpscaleSupported() && upscaleMethod === "ai" && (
+														<p className="text-muted-foreground text-xs">
+															Downloads a ~5MB model once, then enhances each frame
+															while exporting.
+														</p>
+													)}
+												</div>
+											)}
 										</SectionContent>
 									</Section>
 

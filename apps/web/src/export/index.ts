@@ -1,5 +1,6 @@
 import type { FrameRate } from "opencut-wasm";
 import { EXPORT_MIME_TYPES } from "./mime-types";
+import type { UpscaleMethod } from "@/upscale/types";
 
 export const EXPORT_QUALITY_VALUES = [
 	"low",
@@ -19,6 +20,15 @@ export interface ExportOptions {
 	quality: ExportQuality;
 	fps?: FrameRate;
 	includeAudio?: boolean;
+	/**
+	 * Upscale the canvas to a larger export resolution. Rendering still
+	 * happens at canvas size; each frame is resampled before encoding.
+	 */
+	upscale?: {
+		width: number;
+		height: number;
+		method: UpscaleMethod;
+	};
 }
 
 export interface ExportResult {

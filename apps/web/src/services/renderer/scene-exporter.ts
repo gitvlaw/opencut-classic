@@ -19,6 +19,8 @@ import { frameRateToFloat } from "@/fps/utils";
 import type { RootNode } from "./nodes/root-node";
 import type { ExportFormat, ExportQuality } from "@/export";
 import { CanvasRenderer } from "./canvas-renderer";
+import { resolveUpscaler } from "@/upscale";
+import type { Upscaler, UpscaleRequest } from "@/upscale/types";
 
 type ExportParams = {
 	width: number;
@@ -28,6 +30,7 @@ type ExportParams = {
 	quality: ExportQuality;
 	shouldIncludeAudio?: boolean;
 	audioBuffer?: AudioBuffer;
+	upscale?: UpscaleRequest;
 };
 
 // NOTE on color management: sources are treated as sRGB/rec.709 (same
@@ -59,6 +62,9 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 	private quality: ExportQuality;
 	private shouldIncludeAudio: boolean;
 	private audioBuffer?: AudioBuffer;
+	private upscale?: UpscaleRequest;
+	private upscaler: Upscaler | null = null;
+	private feedCanvas: HTMLCanvasElement | null = null;
 
 	private isCancelled = false;
 
@@ -70,6 +76,7 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		quality,
 		shouldIncludeAudio,
 		audioBuffer,
+		upscale,
 	}: ExportParams) {
 		super();
 		this.renderer = new CanvasRenderer({
@@ -82,10 +89,49 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		this.quality = quality;
 		this.shouldIncludeAudio = shouldIncludeAudio ?? false;
 		this.audioBuffer = audioBuffer;
+		// Only upscale to strictly larger targets; otherwise stay 1:1.
+		if (
+			upscale &&
+			(upscale.width > width || upscale.height > height) &&
+			upscale.width > 0 &&
+			upscale.height > 0
+		) {
+			this.upscale = upscale;
+		}
 	}
 
 	cancel(): void {
 		this.isCancelled = true;
+		this.upscaler?.dispose?.();
+	}
+
+	/** Canvas the encoder reads. Upscaled copy when requested, else live output. */
+	private getFeedCanvas(): HTMLCanvasElement {
+		if (!this.upscale) {
+			return this.renderer.getOutputCanvas();
+		}
+		if (!this.feedCanvas) {
+			this.feedCanvas = document.createElement("canvas");
+			this.feedCanvas.width = this.upscale.width;
+			this.feedCanvas.height = this.upscale.height;
+		}
+		return this.feedCanvas;
+	}
+
+	/** Resample the just-rendered frame into the feed canvas (no-op 1:1). */
+	private async feedFrame(): Promise<void> {
+		if (!this.upscale || !this.feedCanvas) return;
+		if (!this.upscaler) {
+			this.upscaler = resolveUpscaler(this.upscale.method);
+		}
+		const upscaled = await this.upscaler.upscale(
+			this.renderer.getOutputCanvas(),
+			{ width: this.upscale.width, height: this.upscale.height },
+		);
+		const ctx = this.feedCanvas.getContext("2d");
+		if (!ctx) throw new Error("Failed to get feed canvas context");
+		ctx.clearRect(0, 0, this.feedCanvas.width, this.feedCanvas.height);
+		ctx.drawImage(upscaled, 0, 0, this.feedCanvas.width, this.feedCanvas.height);
 	}
 
 	async export({
@@ -108,7 +154,7 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 			target: new BufferTarget(),
 		});
 
-		const videoSource = new CanvasSource(this.renderer.getOutputCanvas(), {
+		const videoSource = new CanvasSource(this.getFeedCanvas(), {
 			codec: this.format === "webm" ? "vp9" : "avc",
 			bitrate: qualityMap[this.quality],
 		});
@@ -154,6 +200,7 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 			const timeTicks = i * ticksPerFrame;
 			const timeSeconds = mediaTimeToSeconds({ time: timeTicks });
 			await this.renderer.render({ node: rootNode, time: timeTicks });
+			await this.feedFrame();
 			await videoSource.add(timeSeconds, 1 / fpsFloat);
 
 			this.emit("progress", i / frameCount);
@@ -167,6 +214,7 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 
 		videoSource.close();
 		await output.finalize();
+		this.upscaler?.dispose?.();
 		this.emit("progress", 1);
 
 		const buffer = output.target.buffer;

@@ -16,6 +16,7 @@ pub const LUT_3D_SHADER_ID: &str = "lut-3d";
 pub const COLOR_GRADE_HSL_SHADER_ID: &str = "color-grade-hsl";
 pub const COLOR_WHEELS_SHADER_ID: &str = "color-wheels";
 pub const SHARPEN_SHADER_ID: &str = "sharpen";
+pub const UPSCALE_SHADER_ID: &str = "upscale";
 
 const GAUSSIAN_BLUR_SHADER_SOURCE: &str = include_str!("shaders/gaussian_blur.wgsl");
 const COLOR_GRADE_SHADER_SOURCE: &str = include_str!("shaders/color_grade.wgsl");
@@ -26,6 +27,7 @@ const LUT_3D_SHADER_SOURCE: &str = include_str!("shaders/lut_3d.wgsl");
 const COLOR_GRADE_HSL_SHADER_SOURCE: &str = include_str!("shaders/color_grade_hsl.wgsl");
 const COLOR_WHEELS_SHADER_SOURCE: &str = include_str!("shaders/color_wheels.wgsl");
 const SHARPEN_SHADER_SOURCE: &str = include_str!("shaders/sharpen.wgsl");
+const UPSCALE_SHADER_SOURCE: &str = include_str!("shaders/upscale.wgsl");
 
 /// All shader ids supported by this pipeline version.
 /// Exposed to TS via `listEffectShaders` so the UI can drop passes the
@@ -40,6 +42,7 @@ pub const SHADER_IDS: &[&str] = &[
     COLOR_GRADE_HSL_SHADER_ID,
     COLOR_WHEELS_SHADER_ID,
     SHARPEN_SHADER_ID,
+    UPSCALE_SHADER_ID,
 ];
 
 /// Number of generic data floats shared by all color shaders.
@@ -51,6 +54,16 @@ pub struct ApplyEffectsOptions<'a> {
     pub width: u32,
     pub height: u32,
     pub passes: &'a [EffectPass],
+}
+
+pub struct UpscaleOptions<'a> {
+    pub source: &'a wgpu::Texture,
+    pub src_width: u32,
+    pub src_height: u32,
+    pub dst_width: u32,
+    pub dst_height: u32,
+    /// 0 = bilinear, 1 = bicubic Catmull-Rom, 2 = Lanczos-3.
+    pub mode: f32,
 }
 
 pub struct EffectPipeline {
@@ -150,6 +163,7 @@ impl EffectPipeline {
             (COLOR_GRADE_HSL_SHADER_ID, COLOR_GRADE_HSL_SHADER_SOURCE),
             (COLOR_WHEELS_SHADER_ID, COLOR_WHEELS_SHADER_SOURCE),
             (SHARPEN_SHADER_ID, SHARPEN_SHADER_SOURCE),
+            (UPSCALE_SHADER_ID, UPSCALE_SHADER_SOURCE),
         ];
 
         let mut pipelines = HashMap::with_capacity(shaders.len() + 1);
@@ -344,8 +358,114 @@ impl EffectPipeline {
         current_texture.ok_or(EffectsError::MissingEffectPasses)
     }
 
-    /// Render a `lut-3d` pass. A missing LUT texture is a silent no-op blit —
-    /// a stale/evicted LUT id must never break the frame.
+    /// Resample `source` into a different-size texture (up or down).
+    /// Uniform `resolution` carries the SOURCE size; the shader maps each
+    /// output pixel back into it. `mode`: 0 bilinear, 1 bicubic, 2 lanczos3.
+    pub fn upscale(
+        &self,
+        context: &GpuContext,
+        options: UpscaleOptions<'_>,
+    ) -> Result<wgpu::Texture, EffectsError> {
+        let UpscaleOptions {
+            source,
+            src_width,
+            src_height,
+            dst_width,
+            dst_height,
+            mode,
+        } = options;
+        if dst_width == 0 || dst_height == 0 {
+            return Err(EffectsError::MissingEffectPasses);
+        }
+        let mut data = [0.0f32; EFFECT_DATA_FLOATS];
+        data[0] = mode;
+        let uniform_buffer =
+            context
+                .device()
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("upscale-uniform-buffer"),
+                    contents: bytemuck::bytes_of(&EffectUniformBuffer {
+                        resolution: [src_width as f32, src_height as f32],
+                        direction: [0.0, 0.0],
+                        data,
+                    }),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                });
+
+        let mut encoder =
+            context
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("upscale-command-encoder"),
+                });
+        let output_texture =
+            context.create_render_texture(dst_width, dst_height, "upscale-output-texture");
+        let input_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let texture_bind_group =
+            context
+                .device()
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("upscale-texture-bind-group"),
+                    layout: context.texture_sampler_bind_group_layout(),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&input_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(context.linear_sampler()),
+                        },
+                    ],
+                });
+        let uniform_bind_group =
+            context
+                .device()
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("upscale-uniform-bind-group"),
+                    layout: &self.uniform_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform_buffer.as_entire_binding(),
+                    }],
+                });
+        let pipeline =
+            self.pipelines
+                .get(UPSCALE_SHADER_ID)
+                .ok_or_else(|| EffectsError::UnknownEffectShader {
+                    shader: UPSCALE_SHADER_ID.to_string(),
+                })?;
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("upscale-render-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &output_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            render_pass.set_pipeline(pipeline);
+            render_pass.set_vertex_buffer(0, context.fullscreen_quad().slice(..));
+            render_pass.set_bind_group(0, &texture_bind_group, &[]);
+            render_pass.set_bind_group(1, &uniform_bind_group, &[]);
+            render_pass.draw(0..6, 0..1);
+        }
+
+        context.queue().submit([encoder.finish()]);
+        Ok(output_texture)
+    }
+
+    /// Render a `lut-3d` pass. A missing LUT texture is a silent no-op blit —    /// a stale/evicted LUT id must never break the frame.
     #[allow(clippy::too_many_arguments)]
     fn apply_lut_pass(
         &self,
@@ -478,7 +598,8 @@ fn pack_effect_uniforms(
         | LUT_3D_SHADER_ID
         | COLOR_GRADE_HSL_SHADER_ID
         | COLOR_WHEELS_SHADER_ID
-        | SHARPEN_SHADER_ID => pack_data_uniforms(pass, width, height),
+        | SHARPEN_SHADER_ID
+        | UPSCALE_SHADER_ID => pack_data_uniforms(pass, width, height),
         _ => Err(EffectsError::UnknownEffectShader {
             shader: pass.shader.clone(),
         }),
