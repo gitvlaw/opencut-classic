@@ -33,14 +33,40 @@ export function compute1080pTarget(canvasWidth: number, canvasHeight: number): U
 	if (canvasWidth <= 0 || canvasHeight <= 0) {
 		return { width: 1920, height: 1080 };
 	}
+	if (canvasHeight >= canvasWidth) {
+		// Portrait: 1080 wide, height scaled.
+		const width = 1080;
+		const height = Math.max(2, Math.round(((1080 * canvasHeight) / canvasWidth) / 2) * 2);
+		return { width, height };
+	}
 	const height = 1080;
 	const width = Math.max(2, Math.round(((1080 * canvasWidth) / canvasHeight) / 2) * 2);
 	return { width, height };
 }
 
-/** Only offer upscale when the canvas is actually smaller than 1080p. */
+/** 4K UHD target: exact 2x of canvas (even dims), ideal for the AI 2x model. */
+export function compute4kTarget(canvasWidth: number, canvasHeight: number): UpscaleTarget {
+	if (canvasWidth <= 0 || canvasHeight <= 0) {
+		return { width: 3840, height: 2160 };
+	}
+	const even = (v: number) => Math.max(2, Math.round(v / 2) * 2);
+	return { width: even(canvasWidth * 2), height: even(canvasHeight * 2) };
+}
+
+/**
+ * Offer the 1080p family when the canvas is below it on its short side
+ * (landscape height / portrait width). A 1080x1920 portrait is already
+ * there — it gets the 4K option instead.
+ */
 export function shouldOfferUpscale(canvasWidth: number, canvasHeight: number): boolean {
-	return canvasWidth > 0 && canvasHeight > 0 && canvasHeight < 1080;
+	if (canvasWidth <= 0 || canvasHeight <= 0) return false;
+	return Math.min(canvasWidth, canvasHeight) < 1080;
+}
+
+/** Offer 4K UHD while the long side is below it. */
+export function shouldOffer4k(canvasWidth: number, canvasHeight: number): boolean {
+	if (canvasWidth <= 0 || canvasHeight <= 0) return false;
+	return Math.max(canvasWidth, canvasHeight) < 3840;
 }
 
 /** Snapshot any canvas source into an OffscreenCanvas (2D copy). */

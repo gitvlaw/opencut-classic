@@ -5,7 +5,7 @@ describe("packHwcToNchw", () => {
 	it("round-trips through unpack", () => {
 		const hwc = new Float32Array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1, 0, 0.5]);
 		const nchw = packHwcToNchw(hwc, 2, 2);
-		const r5 = (a: ArrayLike<number>) => [...a].map((v) => +v.toFixed(5));
+		const r5 = (a: ArrayLike<number>) => Array.from(a, (v) => +v.toFixed(5));
 		expect(r5(nchw)).toEqual(r5([0.1, 0.4, 0.7, 1, 0.2, 0.5, 0.8, 0, 0.3, 0.6, 0.9, 0.5]));
 		const back = unpackNchwToHwc(nchw, 2, 2, [1, 3, 2, 2]);
 		expect(r5(back)).toEqual(r5(hwc));

@@ -2,6 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { computeTiles, tileWeight } from "../tiling";
 import {
 	compute1080pTarget,
+	compute4kTarget,
+	shouldOffer4k,
 	shouldOfferUpscale,
 	UPSCALE_BICUBIC,
 	UPSCALE_BILINEAR,
@@ -81,6 +83,21 @@ describe("1080p targets", () => {
 		expect(shouldOfferUpscale(960, 540)).toBe(true);
 		expect(shouldOfferUpscale(1920, 1080)).toBe(false);
 		expect(shouldOfferUpscale(3840, 2160)).toBe(false);
+	});
+
+	it("offers 1080p to portrait canvases by short side", () => {
+		expect(shouldOfferUpscale(720, 1280)).toBe(true);
+		expect(compute1080pTarget(720, 1280)).toEqual({ width: 1080, height: 1920 });
+		// 1080x1920 portrait is already there — gets 4K instead.
+		expect(shouldOfferUpscale(1080, 1920)).toBe(false);
+		expect(shouldOffer4k(1080, 1920)).toBe(true);
+	});
+
+	it("4K target is an exact even 2x", () => {
+		expect(compute4kTarget(1920, 1080)).toEqual({ width: 3840, height: 2160 });
+		expect(compute4kTarget(1080, 1920)).toEqual({ width: 2160, height: 3840 });
+		expect(shouldOffer4k(3840, 2160)).toBe(false);
+		expect(shouldOffer4k(1920, 1080)).toBe(true);
 	});
 
 	it("shader mode ids are stable (match upscale.wgsl)", () => {

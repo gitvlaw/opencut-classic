@@ -36,6 +36,8 @@ import { useEditor } from "@/editor/use-editor";
 import { DEFAULT_EXPORT_OPTIONS } from "@/export/defaults";
 import {
 	compute1080pTarget,
+	compute4kTarget,
+	shouldOffer4k,
 	shouldOfferUpscale,
 	type UpscaleMethod,
 } from "@/upscale";
@@ -116,19 +118,28 @@ function ExportPopover({
 	const [shouldIncludeAudio, setShouldIncludeAudio] = useState<boolean>(
 		DEFAULT_EXPORT_OPTIONS.includeAudio ?? true,
 	);
-	const [upscaleTo1080, setUpscaleTo1080] = useState(false);
+	type ResolutionChoice = "original" | "hd" | "uhd";
+	const [resolution, setResolution] = useState<ResolutionChoice>("original");
 	const [upscaleMethod, setUpscaleMethod] = useState<UpscaleMethod>("shader");
 	const [aiEnhance, setAiEnhance] = useState(false);
+
+	const canvasW = activeProject?.settings.canvasSize.width ?? 0;
+	const canvasH = activeProject?.settings.canvasSize.height ?? 0;
+	const canHd = shouldOfferUpscale(canvasW, canvasH);
+	const canUhd = shouldOffer4k(canvasW, canvasH);
+	const hdTarget = canHd ? compute1080pTarget(canvasW, canvasH) : null;
+	const uhdTarget = canUhd ? compute4kTarget(canvasW, canvasH) : null;
 
 	const handleExport = async () => {
 		if (!activeProject) return;
 
 		const canvasSize = activeProject.settings.canvasSize;
-		const canUpscale = shouldOfferUpscale(canvasSize.width, canvasSize.height);
 		const target =
-			upscaleTo1080 && canUpscale
-				? compute1080pTarget(canvasSize.width, canvasSize.height)
-				: null;
+			resolution === "hd"
+				? hdTarget
+				: resolution === "uhd"
+					? uhdTarget
+					: null;
 		// AI enhance also works at canvas resolution (2x internal, then fit
 		// back) — denoise + detail even without upscaling.
 		const wantEnhance = !!target || (aiEnhance && isAiUpscaleSupported());
@@ -235,44 +246,39 @@ function ExportPopover({
 										</SectionHeader>
 										<SectionContent>
 											<RadioGroup
-												value={upscaleTo1080 ? "hd" : "original"}
-												onValueChange={(value) => setUpscaleTo1080(value === "hd")}
+												value={resolution}
+												onValueChange={(value) => {
+													if (value === "original" || value === "hd" || value === "uhd") {
+														setResolution(value);
+													}
+												}}
 											>
 												<div className="flex items-center space-x-2">
 													<RadioGroupItem value="original" id="res-original" />
 													<Label htmlFor="res-original">
-														Original ({activeProject?.settings.canvasSize.width}×
-														{activeProject?.settings.canvasSize.height})
+														Original ({canvasW}×{canvasH})
 													</Label>
 												</div>
 												<div className="flex items-center space-x-2">
-													<RadioGroupItem
-														value="hd"
-														id="res-hd"
-														disabled={
-															!activeProject ||
-															!shouldOfferUpscale(
-																activeProject.settings.canvasSize.width,
-																activeProject.settings.canvasSize.height,
-															)
-														}
-													/>
+													<RadioGroupItem value="hd" id="res-hd" disabled={!canHd} />
 													<Label htmlFor="res-hd">
-														1080p HD — upscale on export
+														1080p HD{hdTarget ? ` (${hdTarget.width}×${hdTarget.height})` : ""}
+													</Label>
+												</div>
+												<div className="flex items-center space-x-2">
+													<RadioGroupItem value="uhd" id="res-uhd" disabled={!canUhd} />
+													<Label htmlFor="res-uhd">
+														4K UHD{uhdTarget ? ` (${uhdTarget.width}×${uhdTarget.height})` : ""}
 													</Label>
 												</div>
 											</RadioGroup>
-											{activeProject &&
-												!shouldOfferUpscale(
-													activeProject.settings.canvasSize.width,
-													activeProject.settings.canvasSize.height,
-												) && (
-													<p className="text-muted-foreground mt-1 text-xs">
-														Canvas is already 1080p or higher — no upscale
-														needed. Use AI enhance below for extra detail.
-													</p>
-												)}
-											{upscaleTo1080 && (
+											{!canHd && !canUhd && (
+												<p className="text-muted-foreground mt-1 text-xs">
+													Canvas is already 4K — no upscale needed. Use AI
+													enhance below for extra detail.
+												</p>
+											)}
+											{resolution !== "original" && (
 												<div className="mt-2 flex flex-col gap-2 pl-6">
 													<RadioGroup
 														value={upscaleMethod}
