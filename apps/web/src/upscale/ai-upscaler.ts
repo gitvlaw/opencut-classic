@@ -15,6 +15,8 @@ import type { Upscaler, UpscaleTarget } from "./types";
 export class AiUpscaler implements Upscaler {
 	readonly method = "ai" as const;
 	private readonly shader = new ShaderUpscaler();
+	private lastSignature: { width: number; height: number; gray: Float32Array } | null = null;
+	private lastOutput: { canvas: OffscreenCanvas; targetWidth: number; targetHeight: number } | null = null;
 
 	async upscale(
 		source: CanvasImageSource,
@@ -24,12 +26,16 @@ export class AiUpscaler implements Upscaler {
 			return await this.upscaleAi(source, target);
 		} catch (error) {
 			console.warn("AI upscale failed, falling back to shader:", error);
+			this.lastSignature = null;
+			this.lastOutput = null;
 			return this.shader.upscale(source, target);
 		}
 	}
 
 	dispose(): void {
 		upscaleService.dispose();
+		this.lastSignature = null;
+		this.lastOutput = null;
 	}
 
 	private async upscaleAi(
@@ -42,14 +48,63 @@ export class AiUpscaler implements Upscaler {
 		const snapshot = snapshotToOffscreen(source, sw, sh);
 		if (!snapshot) throw new Error("Failed to snapshot frame");
 
+		// Static-scene shortcut: talking heads barely change frame to
+		// frame — reuse the last AI output instead of re-inferring.
+		const cached = this.staticCacheHit(snapshot, target);
+		if (cached) {
+			console.info("[upscale] static frame — reusing last AI output");
+			return cached;
+		}
+
 		const doubled = await upscaleService.upscaleFrame(snapshot);
 		const merged = attachBilinearAlpha({ rgb: doubled, source });
-		// Exact target size (2x output rarely matches, e.g. 720p -> 1080p).
-		if (merged.width === target.width && merged.height === target.height) {
-			return merged;
-		}
-		return this.shader.upscale(merged, target);
+		const out =
+			merged.width === target.width && merged.height === target.height
+				? merged
+				: await this.shader.upscale(merged, target);
+		this.lastSignature = { width: sw, height: sh, gray: frameSignature(snapshot) };
+		this.lastOutput = { canvas: out, targetWidth: target.width, targetHeight: target.height };
+		return out;
 	}
+
+	private staticCacheHit(
+		snapshot: OffscreenCanvas,
+		target: UpscaleTarget,
+	): OffscreenCanvas | null {
+		if (!this.lastSignature || !this.lastOutput) return null;
+		if (
+			this.lastSignature.width !== snapshot.width ||
+			this.lastSignature.height !== snapshot.height ||
+			this.lastOutput.targetWidth !== target.width ||
+			this.lastOutput.targetHeight !== target.height
+		) {
+			return null;
+		}
+		const current = frameSignature(snapshot);
+		const prev = this.lastSignature.gray;
+		if (current.length !== prev.length) return null;
+		let mad = 0;
+		for (let i = 0; i < current.length; i++) mad += Math.abs((current[i] ?? 0) - (prev[i] ?? 0));
+		mad /= current.length;
+		// ~1.5 gray levels average change: below human-noticeable motion.
+		return mad < 1.5 ? this.lastOutput.canvas : null;
+	}
+}
+
+/** Tiny 64px grayscale signature for static-frame detection. */
+function frameSignature(source: OffscreenCanvas): Float32Array {
+	const w = 64;
+	const h = Math.max(1, Math.round((64 * source.height) / Math.max(1, source.width)));
+	const small = new OffscreenCanvas(w, h);
+	const ctx = small.getContext("2d", { willReadFrequently: true });
+	if (!ctx) return new Float32Array(0);
+	ctx.drawImage(source, 0, 0, w, h);
+	const img = ctx.getImageData(0, 0, w, h);
+	const out = new Float32Array(w * h);
+	for (let i = 0, j = 0; i < img.data.length; i += 4, j++) {
+		out[j] = 0.2126 * img.data[i]! + 0.7152 * img.data[i + 1]! + 0.0722 * img.data[i + 2]!;
+	}
+	return out;
 }
 
 /** Re-attach alpha: bilinear-upscaled source alpha over AI RGB. */

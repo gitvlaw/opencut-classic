@@ -1,4 +1,5 @@
-import { fetchModelWithCache, UPSCALE_MODEL_CONFIG } from "./model";
+import { fetchModelWithCache, UPSCALE_MODEL_FP16, UPSCALE_MODEL_FP32 } from "./model";
+import { chooseTileSize } from "./tiling";
 import type {
 	UpscaleInboundMessage,
 	UpscaleOutboundMessage,
@@ -26,6 +27,7 @@ export class UpscaleService {
 	private initPromise: Promise<string> | null = null;
 	private jobId = 0;
 	private pending: PendingJob | null = null;
+	private activeModelId = "";
 
 	onProgress?: (progress: UpscaleFrameProgress) => void;
 
@@ -41,10 +43,15 @@ export class UpscaleService {
 		return this.initPromise;
 	}
 
+	get modelId(): string {
+		return this.activeModelId;
+	}
+
 	async upscaleFrame(
 		source: OffscreenCanvas,
 		onProgress?: (progress: UpscaleFrameProgress) => void,
 	): Promise<OffscreenCanvas> {
+		const started = performance.now();
 		await this.ensureInitialized();
 		if (this.pending) throw new Error("Upscale already in progress");
 
@@ -69,11 +76,19 @@ export class UpscaleService {
 		}
 
 		const id = ++this.jobId;
+		const tileSize = chooseTileSize(width, height);
 		const result = new Promise<OffscreenCanvas>((resolve, reject) => {
-			this.pending = { resolve, reject, onProgress: onProgress ?? this.onProgress };
+			const wrappedResolve = (canvas: OffscreenCanvas) => {
+				console.info(
+					`[upscale] frame ${width}x${height} (${this.activeModelId}, tile ${tileSize}): ` +
+						`${Math.round(performance.now() - started)}ms total`,
+				);
+				resolve(canvas);
+			};
+			this.pending = { resolve: wrappedResolve, reject, onProgress: onProgress ?? this.onProgress };
 		});
 		this.getWorker().postMessage(
-			{ type: "upscale-image", id, width, height, data: rgb } satisfies UpscaleInboundMessage,
+			{ type: "upscale-image", id, width, height, data: rgb, tileSize } satisfies UpscaleInboundMessage,
 			[rgb.buffer as Transferable],
 		);
 		return result;
@@ -93,12 +108,30 @@ export class UpscaleService {
 	private async init(
 		onDownload?: (loaded: number, total: number) => void,
 	): Promise<string> {
-		const buffer = await fetchModelWithCache(UPSCALE_MODEL_CONFIG, onDownload);
-		if (!buffer || buffer.byteLength < 1000) {
-			throw new Error("Upscale model is missing or empty");
+		// FP16 first (half bandwidth, faster on RTX); FP32 fallback covers
+		// EPs without float16 support.
+		const errors: string[] = [];
+		for (const config of [UPSCALE_MODEL_FP16, UPSCALE_MODEL_FP32]) {
+			try {
+				const buffer = await fetchModelWithCache(config, onDownload);
+				if (!buffer || buffer.byteLength < 1000) {
+					throw new Error(`Model ${config.id} is missing or empty`);
+				}
+				const provider = await this.initSession(buffer);
+				this.activeModelId = `${config.id}+${provider}`;
+				console.info(`[upscale] session ready: ${this.activeModelId}`);
+				return provider;
+			} catch (error) {
+				errors.push(`${config.id}: ${error instanceof Error ? error.message : String(error)}`);
+				console.warn(`[upscale] ${config.id} failed, trying next:`, error);
+			}
 		}
+		throw new Error(`Upscale init failed: ${errors.join(" | ")}`);
+	}
+
+	private initSession(buffer: ArrayBuffer): Promise<string> {
 		const worker = this.getWorker();
-		const provider = await new Promise<string>((resolve, reject) => {
+		return new Promise<string>((resolve, reject) => {
 			const timeout = setTimeout(() => reject(new Error("Upscale worker init timed out")), 120_000);
 			const onMessage = (event: MessageEvent<UpscaleOutboundMessage>) => {
 				const message = event.data;
@@ -117,7 +150,6 @@ export class UpscaleService {
 				buffer as Transferable,
 			]);
 		});
-		return provider;
 	}
 
 	private getWorker(): Worker {
@@ -147,6 +179,9 @@ export class UpscaleService {
 				this.pending = null;
 				if (!pending) break;
 				try {
+					console.info(
+						`[upscale] tiles done: avg ${message.avgTileMs.toFixed(1)}ms/tile (${this.activeModelId})`,
+					);
 					const canvas = new OffscreenCanvas(message.width, message.height);
 					const ctx = canvas.getContext("2d");
 					if (!ctx) throw new Error("Failed to create output canvas");

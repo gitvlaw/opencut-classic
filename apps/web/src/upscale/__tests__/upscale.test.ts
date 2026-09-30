@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { computeTiles, tileWeight } from "../tiling";
+import { chooseTileSize, computeTiles, tileWeight } from "../tiling";
 import {
 	compute1080pTarget,
 	compute4kTarget,
@@ -9,6 +9,20 @@ import {
 	UPSCALE_BILINEAR,
 	UPSCALE_LANCZOS,
 } from "../types";
+
+describe("chooseTileSize", () => {
+	it("uses 512px tiles on large frames (fewer dispatches)", () => {
+		expect(chooseTileSize(1080, 1920)).toBe(512);
+		expect(chooseTileSize(1920, 1080)).toBe(512);
+		// 1080x1920 portrait drops from 40 to 12 tiles.
+		expect(computeTiles(1080, 1920, chooseTileSize(1080, 1920), 16).length).toBe(12);
+	});
+
+	it("keeps 256px tiles on small frames", () => {
+		expect(chooseTileSize(960, 540)).toBe(256);
+		expect(chooseTileSize(720, 1280)).toBe(512);
+	});
+});
 
 describe("computeTiles", () => {
 	it("covers 960x540 with 256/16 with no gaps", () => {

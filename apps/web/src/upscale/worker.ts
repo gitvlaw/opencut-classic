@@ -11,7 +11,7 @@ import type {
 declare const self: DedicatedWorkerGlobalScope;
 
 const UPSCALE_FACTOR = 2;
-const TILE_SIZE = 256;
+const DEFAULT_TILE_SIZE = 256;
 const TILE_OVERLAP = 16;
 
 let session: ort.InferenceSession | null = null;
@@ -33,7 +33,13 @@ self.onmessage = async (event: MessageEvent<UpscaleInboundMessage>) => {
 			await handleInit(message.model);
 			break;
 		case "upscale-image":
-			await handleUpscaleImage(message.id, message.width, message.height, message.data);
+			await handleUpscaleImage(
+				message.id,
+				message.width,
+				message.height,
+				message.data,
+				message.tileSize,
+			);
 			break;
 		case "cancel":
 			isCancelled = true;
@@ -74,6 +80,7 @@ async function handleUpscaleImage(
 	width: number,
 	height: number,
 	data: Float32Array,
+	tileSize: number,
 ): Promise<void> {
 	try {
 		isCancelled = false;
@@ -81,17 +88,19 @@ async function handleUpscaleImage(
 		if (data.length !== width * height * 3) {
 			throw new Error(`Bad frame buffer: ${data.length} for ${width}x${height}`);
 		}
+		const tile = Math.max(64, Math.min(1024, Math.floor(tileSize) || DEFAULT_TILE_SIZE));
 
 		const outW = width * UPSCALE_FACTOR;
 		const outH = height * UPSCALE_FACTOR;
 		const acc = new Float32Array(outW * outH * 3);
 		const weights = new Float32Array(outW * outH);
 
-		const tiles = computeTiles(width, height, TILE_SIZE, TILE_OVERLAP);
+		const tiles = computeTiles(width, height, tile, TILE_OVERLAP);
 		const inputName = session.inputNames[0] ?? "input";
 		const outputName = session.outputNames[0] ?? "output";
 
 		let done = 0;
+		let inferMsTotal = 0;
 		for (const tile of tiles) {
 			if (isCancelled) {
 				post({ type: "cancelled" });
@@ -113,7 +122,9 @@ async function handleUpscaleImage(
 
 			const feeds: Record<string, ort.Tensor> = {};
 			feeds[inputName] = new ort.Tensor("float32", nchw, [1, 3, tile.h, tile.w]);
+			const inferStart = performance.now();
 			const results = await session.run(feeds);
+			inferMsTotal += performance.now() - inferStart;
 			const outputTensor = results[outputName];
 			const out = outputTensor?.data as Float32Array | undefined;
 			if (!out) throw new Error("Upscale model returned no output");
@@ -158,7 +169,14 @@ async function handleUpscaleImage(
 		}
 
 		post(
-			{ type: "image_complete", id, width: outW, height: outH, data: acc },
+			{
+				type: "image_complete",
+				id,
+				width: outW,
+				height: outH,
+				data: acc,
+				avgTileMs: tiles.length > 0 ? inferMsTotal / tiles.length : 0,
+			},
 			[acc.buffer as Transferable],
 		);
 	} catch (error) {

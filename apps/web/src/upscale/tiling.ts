@@ -11,6 +11,19 @@ export interface ImageTile {
 	sharedBottom: boolean;
 }
 
+export const TILE_SMALL = 256;
+export const TILE_LARGE = 512;
+export const TILE_OVERLAP = 16;
+
+/**
+ * Large frames get 512px tiles: far fewer kernel launches and better GPU
+ * occupancy (a 1080x1920 frame drops from 40 to 12 tiles). 8GB VRAM
+ * handles 512px CUGAN tiles comfortably.
+ */
+export function chooseTileSize(width: number, height: number): number {
+	return Math.max(width, height) > 1000 ? TILE_LARGE : TILE_SMALL;
+}
+
 /**
  * Cover W×H with `tile`-size tiles bleeding `overlap` px into neighbors.
  * Edge tiles clamp to the frame (overlap with the last neighbor grows).
