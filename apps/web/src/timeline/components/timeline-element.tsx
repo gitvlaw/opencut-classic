@@ -885,43 +885,58 @@ function ExpandedKeyframeLanes({
 								keyframe: keyframeRef,
 							});
 
-							return (
-								<button
-									key={kf.id}
-									type="button"
-									className={cn(
-										"pointer-events-auto absolute top-1/2 -translate-x-1/2 -translate-y-1/2 cursor-grab",
-										isBoxSelecting && "pointer-events-none",
-									)}
-									style={{ left: visualOffset }}
-									onMouseDown={(event) => {
-										event.stopPropagation();
-										onKeyframeMouseDown({
-											event,
-											keyframes: [keyframeRef],
-										});
-									}}
-									onClick={(event) => {
+						return (
+							// NOTE: expanded lanes render inside the element's own
+							// <button>, so this must not be a nested <button>.
+							<span
+								key={kf.id}
+								role="button"
+								tabIndex={0}
+								className={cn(
+									"pointer-events-auto absolute top-1/2 -translate-x-1/2 -translate-y-1/2 cursor-grab mr-0.5",
+									isBoxSelecting && "pointer-events-none",
+								)}
+								style={{ left: visualOffset }}
+								onMouseDown={(event) => {
+									event.stopPropagation();
+									onKeyframeMouseDown({
+										event,
+										keyframes: [keyframeRef],
+									});
+								}}
+								onClick={(event) => {
+									event.stopPropagation();
+									onKeyframeClick({
+										event,
+										keyframes: [keyframeRef],
+										orderedKeyframes,
+										indicatorTime: kf.time,
+									});
+								}}
+								onKeyDown={(event) => {
+									if (event.key === "Enter" || event.key === " ") {
+										event.preventDefault();
 										event.stopPropagation();
 										onKeyframeClick({
-											event,
+											event: event as unknown as React.MouseEvent,
 											keyframes: [keyframeRef],
 											orderedKeyframes,
 											indicatorTime: kf.time,
 										});
-									}}
-									aria-label="Select keyframe"
-								>
-									<HugeiconsIcon
-										icon={KeyframeIcon}
-										className={cn(
-											"size-3.5 text-black mr-1",
-											isSelected ? "fill-primary" : "fill-white",
-										)}
-										strokeWidth={1.5}
-									/>
-								</button>
-							);
+									}
+								}}
+								aria-label="Select keyframe"
+							>
+								<HugeiconsIcon
+									icon={KeyframeIcon}
+									className={cn(
+										"size-3.5 text-black mr-1",
+										isSelected ? "fill-primary" : "fill-white",
+									)}
+									strokeWidth={1.5}
+								/>
+							</span>
+						);
 						})}
 					</div>
 				);
@@ -1104,15 +1119,26 @@ function EffectsButton({
 		setActiveTab({ elementType: element.type, tabId: "effects" });
 	};
 
+	// NOTE: the timeline element itself renders as a <button>, so this must
+	// not be a nested <button> (invalid HTML, hydration error). A span with
+	// button role preserves the click target behavior.
 	return (
-		<button
-			type="button"
+		<span
+			role="button"
+			tabIndex={-1}
+			aria-label="Open effects"
 			className="flex shrink-0 justify-center text-white cursor-pointer"
 			onMouseDown={(event) => event.stopPropagation()}
 			onClick={handleClick}
+			onKeyDown={(event) => {
+				if (event.key === "Enter" || event.key === " ") {
+					event.preventDefault();
+					handleClick(event as unknown as React.MouseEvent);
+				}
+			}}
 		>
 			<HugeiconsIcon icon={MagicWand05Icon} size={12} />
-		</button>
+		</span>
 	);
 }
 
