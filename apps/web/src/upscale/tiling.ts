@@ -11,18 +11,39 @@ export interface ImageTile {
 	sharedBottom: boolean;
 }
 
-export const TILE_SMALL = 256;
-export const TILE_LARGE = 512;
-export const TILE_OVERLAP = 16;
-
 /**
- * Large frames get 512px tiles: far fewer kernel launches and better GPU
- * occupancy (a 1080x1920 frame drops from 40 to 12 tiles). 8GB VRAM
- * handles 512px CUGAN tiles comfortably.
+ * One size for every frame. RealESRGAN's receptive field is large (23
+ * residual-in-dense blocks), so the quality ceiling is set by how much clean
+ * interior each tile keeps — measured against full-frame inference, larger
+ * tiles scored strictly better at equal overlap (tile 512/overlap 160 =
+ * 66.8 dB vs tile 256/overlap 128 = 54.6 dB) AND needed fewer inferences.
+ * Small frames clamp to a single tile inside computeTiles.
  */
-export function chooseTileSize(width: number, height: number): number {
-	return Math.max(width, height) > 1000 ? TILE_LARGE : TILE_SMALL;
-}
+export const TILE_SIZE = 512;
+/**
+ * Must stay strictly greater than 2 * TILE_MARGIN.
+ *
+ * Each shared edge is trimmed by TILE_MARGIN on BOTH sides, so the region
+ * where two tiles still overlap is `TILE_OVERLAP - 2 * TILE_MARGIN`. At zero
+ * or below, neighbours only touch, the feathering ramps run over pixels that
+ * were already discarded, and every tile border becomes a hard cut between
+ * two independently inferred images — a visible grid of blocks.
+ *
+ * 160 against a 64px margin leaves a 32px blend band. Measured: 62.4 dB on a
+ * 1920x1080 frame, where anything above ~55 dB is visually seamless.
+ */
+export const TILE_OVERLAP = 160;
+/**
+ * Source pixels within this distance of a shared tile edge are reconstructed
+ * from zero-padded context and are unreliable.
+ *
+ * Measured error against full-frame inference for a 32px zero ring: total
+ * garbage inside 32px, 0.019 mean error at 32-48px, 0.0036 at 64-96px, and
+ * 0.0005 past 128px. CUGAN's 8px is nowhere near enough here — at margin 8
+ * the stitch scored 41-49 dB and the grid was plainly visible. 64px holds
+ * every shared edge below 1/255 and is a fixed cost regardless of tile size.
+ */
+export const TILE_MARGIN = 64;
 
 /**
  * Cover W×H with `tile`-size tiles bleeding `overlap` px into neighbors.

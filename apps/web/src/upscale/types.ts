@@ -16,7 +16,7 @@ export interface UpscaleRequest extends UpscaleTarget {
 
 /**
  * Resolution-change backend. Shader = realtime WGSL (Lanczos3); AI =
- * Real-CUGAN worker (slow, export-time). Both sides of the boundary speak
+ * Real-ESRGAN worker (slow, export-time). Both sides of the boundary speak
  * plain canvases so the export loop doesn't care which one runs.
  */
 export interface Upscaler {

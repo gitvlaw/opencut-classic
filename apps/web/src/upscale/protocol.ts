@@ -1,6 +1,13 @@
 export type UpscaleInboundMessage =
 	| { type: "init"; model: ArrayBuffer }
-	| { type: "upscale-image"; id: number; width: number; height: number; data: Float32Array; tileSize: number }
+	| {
+			type: "upscale-image";
+			id: number;
+			width: number;
+			height: number;
+			imageBitmap: ImageBitmap;
+			tileSize: number;
+	  }
 	| { type: "cancel" };
 
 export type UpscaleOutboundMessage =
@@ -11,8 +18,8 @@ export type UpscaleOutboundMessage =
 			id: number;
 			width: number;
 			height: number;
-			data: Float32Array;
+			imageBitmap: ImageBitmap;
 			avgTileMs: number;
 	  }
-	| { type: "cancelled" }
-	| { type: "error"; message: string };
+	| { type: "cancelled"; id: number }
+	| { type: "error"; message: string; id?: number };

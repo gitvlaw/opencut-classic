@@ -1,5 +1,5 @@
 import { fetchModelWithCache, UPSCALE_MODEL_CONFIG } from "./model";
-import { chooseTileSize } from "./tiling";
+import { TILE_SIZE } from "./tiling";
 import type {
 	UpscaleInboundMessage,
 	UpscaleOutboundMessage,
@@ -20,22 +20,32 @@ export class UpscaleCancelledError extends Error {
 }
 
 type PendingJob = {
+	id: number;
 	resolve: (canvas: OffscreenCanvas) => void;
 	reject: (error: Error) => void;
 	onProgress?: (progress: UpscaleFrameProgress) => void;
 };
 
 /**
- * Main-thread driver for the CUGAN worker. One job at a time (export
- * is strictly sequential); the worker is created lazily and torn down
- * via dispose().
+ * Main-thread driver for the Real-ESRGAN worker. Any number of frames may be in
+ * flight — the worker queues them itself, so the export loop can keep the
+ * GPU and the encoder busy at the same time. The worker is created lazily
+ * and torn down via dispose().
  */
 export class UpscaleService {
 	private worker: Worker | null = null;
 	private initPromise: Promise<string> | null = null;
 	private jobId = 0;
-	private pending: PendingJob | null = null;
+	private pending = new Map<number, PendingJob>();
 	private activeModelId = "";
+	/**
+	 * Bumped on dispose(). Frames already in flight (mid createImageBitmap,
+	 * mid ensureInitialized) compare their captured generation against this
+	 * and bail out. Without the check they would lazily recreate a worker
+	 * after teardown — one leaked worker per export, each holding a WebGPU
+	 * session and ~600MB of tile buffers.
+	 */
+	private generation = 0;
 
 	onProgress?: (progress: UpscaleFrameProgress) => void;
 
@@ -44,7 +54,11 @@ export class UpscaleService {
 	): Promise<string> {
 		if (!this.initPromise) {
 			this.initPromise = this.init(onDownload).catch((error) => {
+				// Clear the memo so a later export (new session, e.g. the
+				// browser gained WebGPU) can retry. Without this a single
+				// transient failure poisons the service for the page's life.
 				this.initPromise = null;
+				this.activeModelId = "";
 				throw error;
 			});
 		}
@@ -60,70 +74,81 @@ export class UpscaleService {
 		onProgress?: (progress: UpscaleFrameProgress) => void,
 	): Promise<OffscreenCanvas> {
 		const started = performance.now();
+		const generation = this.generation;
 		await this.ensureInitialized();
-		if (this.pending) throw new Error("Upscale already in progress");
+		if (generation !== this.generation) {
+			throw new UpscaleCancelledError();
+		}
 
 		const width = source.width;
 		const height = source.height;
-		const ctx = source.getContext("2d", { willReadFrequently: true });
-		if (!ctx) throw new Error("Failed to read source frame");
-		let img: ImageData;
-		try {
-			img = ctx.getImageData(0, 0, width, height);
-		} catch (error) {
-			throw new Error(`Failed to read frame pixels: ${String(error)}`);
+
+		const imageBitmap = await createImageBitmap(source);
+		if (generation !== this.generation) {
+			imageBitmap.close();
+			throw new UpscaleCancelledError();
 		}
 
-		// RGB float 0..1 (alpha is handled on the caller side).
-		const rgb = new Float32Array(width * height * 3);
-		const px = img.data;
-		for (let i = 0, j = 0; i < px.length; i += 4, j += 3) {
-			rgb[j] = px[i]! / 255;
-			rgb[j + 1] = px[i + 1]! / 255;
-			rgb[j + 2] = px[i + 2]! / 255;
-		}
-
-const id = ++this.jobId;
-		const tileSize = chooseTileSize(width, height);
+		const id = ++this.jobId;
+		const tileSize = TILE_SIZE;
 		const result = new Promise<OffscreenCanvas>((resolve, reject) => {
 			const wrappedResolve = (canvas: OffscreenCanvas) => {
 				console.info(
 					`[upscale] frame ${width}x${height} (${this.activeModelId}, tile ${tileSize}): ` +
-					`${Math.round(performance.now() - started)}ms total`,
+						`${Math.round(performance.now() - started)}ms total`,
 				);
 				resolve(canvas);
 			};
-			this.pending = { resolve: wrappedResolve, reject, onProgress: onProgress ?? this.onProgress };
+			this.pending.set(id, {
+				id,
+				resolve: wrappedResolve,
+				reject,
+				onProgress: onProgress ?? this.onProgress,
+			});
 		});
 		this.getWorker().postMessage(
-			{ type: "upscale-image", id, width, height, data: rgb, tileSize } satisfies UpscaleInboundMessage,
-			[rgb.buffer as Transferable],
+			{ type: "upscale-image", id, width, height, imageBitmap, tileSize } satisfies UpscaleInboundMessage,
+			[imageBitmap as Transferable],
 		);
 		return result;
 	}
 
-	/** Reject the in-flight frame without touching the worker lifecycle. */
-	private settlePendingWith(error: Error): void {
-		const pending = this.pending;
-		this.pending = null;
-		pending?.reject(error);
+	/** Reject one in-flight frame without touching the worker lifecycle. */
+	private settleJobWith(id: number, error: Error): void {
+		const job = this.pending.get(id);
+		if (!job) return;
+		this.pending.delete(id);
+		job.reject(error);
+	}
+
+	/** Reject every in-flight frame (cancel / dispose). */
+	private settleAllWith(error: Error): void {
+		const jobs = [...this.pending.values()];
+		this.pending.clear();
+		for (const job of jobs) job.reject(error);
 	}
 
 	/**
-	 * Stop the current job. The pending frame promise is rejected right away
+	 * Stop the queued work. In-flight frame promises are rejected right away
 	 * (never left hanging) and the worker is told to stop at the next tile
 	 * boundary, so a cancel does not wait a whole tile.
 	 */
 	cancel(): void {
+		// A cancel is final for this export: bump the generation so frames
+		// that were still awaiting init/createImageBitmap don't post into a
+		// worker that has already been told to stop.
+		this.generation++;
 		this.worker?.postMessage({ type: "cancel" } satisfies UpscaleInboundMessage);
-		this.settlePendingWith(new UpscaleCancelledError());
+		this.settleAllWith(new UpscaleCancelledError());
 	}
 
 	dispose(): void {
+		this.generation++;
 		this.worker?.terminate();
 		this.worker = null;
 		this.initPromise = null;
-		this.settlePendingWith(new UpscaleCancelledError());
+		this.activeModelId = "";
+		this.settleAllWith(new UpscaleCancelledError());
 	}
 
 	private async init(
@@ -153,8 +178,7 @@ const id = ++this.jobId;
 					clearTimeout(timeout);
 					worker.removeEventListener("message", onMessage);
 					reject(new Error(message.message));
-				}
-			};
+				}			};
 			worker.addEventListener("message", onMessage);
 			worker.postMessage({ type: "init", model: buffer } satisfies UpscaleInboundMessage, [
 				buffer as Transferable,
@@ -177,7 +201,7 @@ const id = ++this.jobId;
 	private handleMessage(message: UpscaleOutboundMessage): void {
 		switch (message.type) {
 			case "tile_progress": {
-				this.pending?.onProgress?.({
+				this.pending.get(message.id)?.onProgress?.({
 					doneTiles: message.done,
 					totalTiles: message.total,
 					percentage: message.percentage,
@@ -185,26 +209,34 @@ const id = ++this.jobId;
 				break;
 			}
 			case "image_complete": {
-				const pending = this.pending;
-				this.pending = null;
-				if (!pending) break;
+				const pending = this.pending.get(message.id);
+				if (!pending) {
+					// Cancelled after the worker already answered: drop the
+					// bitmap so the transfer isn't leaked.
+					message.imageBitmap?.close?.();
+					break;
+				}
+				this.pending.delete(message.id);
 				try {
 					console.info(
 						`[upscale] tiles done: avg ${message.avgTileMs.toFixed(1)}ms/tile (${this.activeModelId})`,
 					);
-					const canvas = new OffscreenCanvas(message.width, message.height);
-					const ctx = canvas.getContext("2d");
-					if (!ctx) throw new Error("Failed to create output canvas");
-					const img = ctx.createImageData(message.width, message.height);
-					const px = img.data;
-					const src = message.data;
-					for (let i = 0, j = 0; i < px.length; i += 4, j += 3) {
-						px[i] = Math.round(Math.min(1, Math.max(0, src[j] ?? 0)) * 255);
-						px[i + 1] = Math.round(Math.min(1, Math.max(0, src[j + 1] ?? 0)) * 255);
-						px[i + 2] = Math.round(Math.min(1, Math.max(0, src[j + 2] ?? 0)) * 255);
-						px[i + 3] = 255;
+					const bitmap = message.imageBitmap;
+					if (!(bitmap instanceof ImageBitmap)) {
+						throw new Error(
+							`Invalid imageBitmap payload: ${typeof bitmap} (${String(bitmap)})`,
+						);
 					}
-					ctx.putImageData(img, 0, 0);
+					if (bitmap.width === 0 || bitmap.height === 0) {
+						throw new Error(
+							`Upscale worker returned a zero-size frame: ${bitmap.width}x${bitmap.height}`,
+						);
+					}
+					const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+					const ctx = canvas.getContext("2d", { willReadFrequently: false });
+					if (!ctx) throw new Error("Failed to create output canvas");
+					ctx.drawImage(bitmap, 0, 0);
+					bitmap.close();
 					pending.resolve(canvas);
 				} catch (error) {
 					pending.reject(error instanceof Error ? error : new Error(String(error)));
@@ -212,11 +244,14 @@ const id = ++this.jobId;
 				break;
 			}
 			case "cancelled": {
-				this.settlePendingWith(new UpscaleCancelledError());
+				this.settleJobWith(message.id, new UpscaleCancelledError());
 				break;
 			}
 			case "error": {
-				this.settlePendingWith(new Error(message.message));
+				const error = new Error(message.message);
+				// Init errors carry no id and must fail every waiter.
+				if (message.id === undefined) this.settleAllWith(error);
+				else this.settleJobWith(message.id, error);
 				break;
 			}
 			default:

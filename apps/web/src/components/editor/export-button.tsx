@@ -123,6 +123,7 @@ function ExportPopover({
 	const [upscaleMethod, setUpscaleMethod] = useState<UpscaleMethod>("shader");
 	const [aiEnhance, setAiEnhance] = useState(false);
 
+	const aiAvailable = isAiUpscaleSupported();
 	const canvasW = activeProject?.settings.canvasSize.width ?? 0;
 	const canvasH = activeProject?.settings.canvasSize.height ?? 0;
 	const canHd = shouldOfferUpscale(canvasW, canvasH);
@@ -142,12 +143,12 @@ function ExportPopover({
 					: null;
 		// AI enhance also works at canvas resolution (2x internal, then fit
 		// back) — denoise + detail even without upscaling.
-		const wantEnhance = !!target || (aiEnhance && isAiUpscaleSupported());
-		const method: UpscaleMethod = target
-			? isAiUpscaleSupported()
-				? upscaleMethod
-				: "shader"
-			: "ai";
+		// The AI/checkbox pair contradicted each other: a chosen resolution
+		// forced the radio's method, silently ignoring the AI checkbox. One
+		// rule now: AI is on when the radio says so OR the box is ticked.
+		const method: UpscaleMethod =
+			aiAvailable && (upscaleMethod === "ai" || aiEnhance) ? "ai" : "shader";
+		const wantEnhance = !!target || method === "ai";
 
 		const result = await editor.project.export({
 			options: {
@@ -298,19 +299,14 @@ function ExportPopover({
 															<RadioGroupItem
 																value="ai"
 																id="up-ai"
-																disabled={!isAiUpscaleSupported()}
+																disabled={!aiAvailable}
 															/>
 															<Label htmlFor="up-ai">
 																AI enhance (slower, best detail)
 															</Label>
 														</div>
 													</RadioGroup>
-													{!isAiUpscaleSupported() && (
-														<p className="text-muted-foreground text-xs">
-															AI enhance needs a WebGPU browser (Chrome/Edge 113+).
-														</p>
-													)}
-													{isAiUpscaleSupported() && upscaleMethod === "ai" && (
+													{aiAvailable && (
 														<p className="text-muted-foreground text-xs">
 															Downloads a ~5MB model once, then enhances each frame
 															while exporting.
@@ -321,15 +317,21 @@ function ExportPopover({
 											<div className="mt-2 flex items-center space-x-2">
 												<Checkbox
 													id="ai-enhance"
-													checked={aiEnhance}
-													disabled={!isAiUpscaleSupported()}
-													onCheckedChange={(checked) => setAiEnhance(!!checked)}
+													checked={resolution === "original" ? aiEnhance : upscaleMethod === "ai"}
+													disabled={!aiAvailable}
+													onCheckedChange={(checked) => {
+														const next = !!checked;
+														setAiEnhance(next);
+														// Keep the radio in sync so the two controls can't
+														// disagree about which method actually runs.
+														setUpscaleMethod(next ? "ai" : "shader");
+													}}
 												/>
 												<Label htmlFor="ai-enhance">
 													AI enhance (detail + denoise, any resolution)
 												</Label>
 											</div>
-											{!isAiUpscaleSupported() && (
+											{!aiAvailable && (
 												<p className="text-muted-foreground text-xs">
 													AI enhance needs a WebGPU browser (Chrome/Edge 113+).
 												</p>

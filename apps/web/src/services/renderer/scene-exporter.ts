@@ -39,6 +39,17 @@ type ExportParams = {
 // sources are not gamut-mapped — out-of-sRGB colors clip. Graded projects
 // should export at very_high/ultra: 4:2:0 chroma subsampling bleeds
 // saturated colors at low bitrates regardless of pipeline precision.
+/** How often (in frames) the upscale output is checked for blankness.
+ * getImageData on a 4K canvas is a full GPU->CPU sync, so it must not run
+ * per frame. */
+const AI_BLANK_WARN_INTERVAL = 30;
+
+/** Frames kept in flight: one being encoded, one in the worker, and this
+ * many being rendered. Bounds memory (each in-flight frame owns a
+ * full-resolution snapshot) while still letting the worker start frame N+1
+ * the instant frame N is done. */
+const PIPELINE_DEPTH = 3;
+
 const qualityMap = {
 	low: QUALITY_LOW,
 	medium: QUALITY_MEDIUM,
@@ -139,27 +150,98 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		return this.frameCanvas;
 	}
 
-	/** Resample the just-rendered frame into the feed canvas. */
-	private async feedFrame(): Promise<void> {
-		if (!this.upscale || !this.feedCanvas || !this.frameCanvas) return;
+	/**
+	 * Render one frame and hand back an OWNED copy.
+	 *
+	 * The pipeline renders frame N+1 while frame N is still being upscaled,
+	 * so the caller must never hold a reference to the shared frame canvas
+	 * across an await — it gets overwritten. Each in-flight frame therefore
+	 * carries its own snapshot.
+	 *
+	 * NOTE: the snapshot is kept as a plain HTMLCanvasElement rather than an
+	 * ImageBitmap. The snapshot draw has to land before the next
+	 * renderToCanvas() overwrites the source, and a queued drawImage is not
+	 * guaranteed to have executed before that happens. Encoding also runs
+	 * faster than AI inference, so a small post-await delay here does not
+	 * cost throughput — the producer simply runs a frame ahead.
+	 */
+	private async renderFrameSnapshot({
+		rootNode,
+		timeTicks,
+		index,
+	}: {
+		rootNode: RootNode;
+		timeTicks: number;
+		index: number;
+	}): Promise<HTMLCanvasElement> {
+		await this.renderer.renderToCanvas({
+			node: rootNode,
+			time: timeTicks,
+			targetCanvas: this.getFrameCanvas(),
+		});
+		if (index === 0) {
+			this.assertFrameNotBlank({ canvas: this.getFrameCanvas(), what: "frame" });
+		}
+		const frame = this.getFrameCanvas();
+		const snapshot = document.createElement("canvas");
+		snapshot.width = frame.width;
+		snapshot.height = frame.height;
+		const ctx = snapshot.getContext("2d", { willReadFrequently: false });
+		if (!ctx) throw new Error("Failed to snapshot frame canvas");
+		ctx.drawImage(frame, 0, 0);
+		return snapshot;
+	}
+
+	/**
+	 * Start an upscale without awaiting it. The worker serializes inference,
+	 * so several frames can be queued; that is what keeps the GPU busy while
+	 * the main thread renders and the encoder compresses.
+	 */
+	private startUpscale(source: HTMLCanvasElement): Promise<OffscreenCanvas> {
+		if (!this.upscale) {
+			throw new Error("startUpscale called without an upscale request");
+		}
 		if (!this.upscaler) {
 			this.upscaler = resolveUpscaler(this.upscale.method);
 		}
-		const upscaled = await this.upscaler.upscale(
-			this.getFrameCanvas(),
-			{ width: this.upscale.width, height: this.upscale.height },
-		);
-		const ctx = this.feedCanvas.getContext("2d");
+		return this.upscaler.upscale(source, {
+			width: this.upscale.width,
+			height: this.upscale.height,
+		});
+	}
+
+	/** Draw an upscaled frame into the encoder's canvas. */
+	private drawUpscaled(upscaled: OffscreenCanvas): void {
+		if (!this.feedCanvas) return;
+		const ctx = this.feedCanvas.getContext("2d", { willReadFrequently: false });
 		if (!ctx) throw new Error("Failed to get feed canvas context");
 		ctx.clearRect(0, 0, this.feedCanvas.width, this.feedCanvas.height);
 		ctx.drawImage(upscaled, 0, 0, this.feedCanvas.width, this.feedCanvas.height);
 	}
 
+	/** true when every sampled pixel is fully transparent. */
+	private isFrameBlank(canvas: HTMLCanvasElement): boolean {
+		const ctx = canvas.getContext("2d", { willReadFrequently: true });
+		if (!ctx) return false;
+		let img: ImageData;
+		try {
+			img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+		} catch {
+			return false;
+		}
+		const d = img.data;
+		const step = 4099 * 4;
+		for (let i = 3; i < d.length; i += step) {
+			if ((d[i] ?? 0) > 8) return false;
+		}
+		return true;
+	}
+
 	/**
 	 * Fail loud instead of encoding a black file: a fully transparent
-	 * frame means frame capture broke (never legitimate — the compositor
-	 * clears opaque). Genuinely black content still has alpha 255 and
-	 * passes.
+	 * source frame means frame capture broke (never legitimate — the
+	 * compositor clears opaque). Genuinely black content still has alpha
+	 * 255 and passes.
 	 */
 	private assertFrameNotBlank({
 		canvas,
@@ -168,22 +250,25 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		canvas: HTMLCanvasElement;
 		what: string;
 	}): void {
-		const ctx = canvas.getContext("2d", { willReadFrequently: true });
-		if (!ctx) return;
-		let img: ImageData;
-		try {
-			img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-		} catch {
-			return;
-		}
-		const d = img.data;
-		const step = 4099 * 4;
-		for (let i = 3; i < d.length; i += step) {
-			if ((d[i] ?? 0) > 8) return;
-		}
+		if (!this.isFrameBlank(canvas)) return;
 		throw new Error(
 			`Export rendered a blank (fully transparent) ${what} — capture failed. ` +
 				"If this persists, export without upscale/AI and report the project setup.",
+		);
+	}
+
+	/** Non-fatal counterpart for the upscale path: warn, keep exporting. */
+	private warnIfBlankFrame({
+		canvas,
+		what,
+	}: {
+		canvas: HTMLCanvasElement;
+		what: string;
+	}): void {
+		if (!this.isFrameBlank(canvas)) return;
+		console.warn(
+			`[export] ${what} is fully transparent after upscale. The video will ` +
+				"contain blank frames. Consider exporting without AI enhance.",
 		);
 	}
 
@@ -192,6 +277,141 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		this.upscaler?.dispose?.();
 		this.emit("cancelled");
 		return null;
+	}
+
+	/**
+	 * Overlapped upscale export.
+	 *
+	 * A producer task renders frames and hands each one to the worker; a
+	 * consumer task awaits the results in order, draws them into the encoder
+	 * canvas and compresses. Because the worker serializes its own queue, the
+	 * producer can stay ahead and inference for frame N+1 overlaps encoding of
+	 * frame N. The consumer never lets the feed canvas hold the wrong frame:
+	 * it draws and calls add() back-to-back with no await in between that
+	 * could reorder them.
+	 */
+	private async pipelinedExport({
+		rootNode,
+		videoSource,
+		frameCount,
+		ticksPerFrame,
+		fpsFloat,
+	}: {
+		rootNode: RootNode;
+		videoSource: CanvasSource;
+		frameCount: number;
+		ticksPerFrame: number;
+		fpsFloat: number;
+	}): Promise<void> {
+		const queue: {
+			index: number;
+			timeSeconds: number;
+			upscaled: Promise<OffscreenCanvas>;
+		}[] = [];
+		// A one-slot signal deadlocks the two tasks: the consumer can be
+		// parked on an empty queue while the producer pushes a frame without
+		// signalling, and then both park. A waiter list wakes whichever side
+		// is actually blocked.
+		const waiters: (() => void)[] = [];
+		const notify = (): void => {
+			while (waiters.length > 0) waiters.pop()?.();
+		};
+		const waitForWork = (): Promise<void> =>
+			new Promise<void>((resolve) => {
+				waiters.push(resolve);
+			});
+		let encoded = 0;
+		let failure: unknown = null;
+		let producerDone = false;
+
+		const producer = (async () => {
+			try {
+				for (let index = 0; index < frameCount; index++) {
+					if (this.isCancelled || failure) return;
+					// Bound the window: each queued frame owns a
+					// full-resolution snapshot plus its upscaled result.
+					while (queue.length >= PIPELINE_DEPTH && !this.isCancelled && !failure) {
+						await waitForWork();
+					}
+					if (this.isCancelled || failure) return;
+					const timeTicks = index * ticksPerFrame;
+					const snapshot = await this.renderFrameSnapshot({
+						rootNode,
+						timeTicks,
+						index,
+					});
+					if (this.isCancelled || failure) return;
+					queue.push({
+						index,
+						timeSeconds: mediaTimeToSeconds({ time: timeTicks }),
+						upscaled: this.startUpscale(snapshot),
+					});
+					// Wake a consumer parked on an empty queue. Without this
+					// the two tasks deadlock: the producer keeps rendering
+					// while the consumer waits for a frame already queued.
+					notify();
+				}
+			} finally {
+				producerDone = true;
+				// Release a consumer waiting on a queue that will never fill.
+				notify();
+			}
+		})();
+
+		const consumer = (async () => {
+			while (encoded < frameCount) {
+				const job = queue.shift();
+				if (!job) {
+					// Nothing queued: either the producer is mid-render or it
+					// is finished. `producerDone` distinguishes the two, so we
+					// can exit instead of waiting on a task that will never
+					// push again.
+					if (this.isCancelled || producerDone) return;
+					await waitForWork();
+					continue;
+				}
+				let upscaled: OffscreenCanvas;
+				try {
+					upscaled = await job.upscaled;
+				} catch (error) {
+					// A cancel landing mid-upscale is the only expected
+					// failure here; anything else is a real export error.
+					if (this.isCancelled) return;
+					failure ??= error;
+					return;
+				}
+				if (this.isCancelled) return;
+				this.drawUpscaled(upscaled);
+				// Sample, don't assert: a fully transparent AI frame is a
+				// real failure mode of the upscale path, and throwing on
+				// frame 0 only meant the user lost the whole export before
+				// seeing why. Warn instead and keep encoding.
+				if (job.index % AI_BLANK_WARN_INTERVAL === 0) {
+					this.warnIfBlankFrame({
+						canvas: this.getFeedCanvas(),
+						what: `frame ${job.index}`,
+					});
+				}
+				await videoSource.add(job.timeSeconds, 1 / fpsFloat);
+				encoded++;
+				this.emit("progress", encoded / frameCount);
+				// Free a slot for the producer.
+				notify();
+			}
+		})();
+
+		// A producer that throws (capture failure, OOM) must not be able to
+		// park the consumer forever on an empty queue.
+		const settled = await Promise.allSettled([producer, consumer]);
+		if (failure) throw failure;
+		for (const result of settled) {
+			if (result.status === "rejected") throw result.reason;
+		}
+		if (encoded < frameCount && !this.isCancelled) {
+			throw new Error(
+				`Export stopped after ${encoded}/${frameCount} frames without an error`,
+			);
+		}
 	}
 
 	async export({
@@ -251,36 +471,33 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		}
 
 try {
-			for (let i = 0; i < frameCount; i++) {
-				if (this.isCancelled) {
-					return this.abort(output);
+			if (!this.upscale) {
+				// No upscale: the encoder reads the shared frame canvas
+				// directly and there is no worker round-trip to hide, so a
+				// pipeline would only add copies.
+				for (let index = 0; index < frameCount; index++) {
+					if (this.isCancelled) {
+						return this.abort(output);
+					}
+					await this.renderer.renderToCanvas({
+						node: rootNode,
+						time: index * ticksPerFrame,
+						targetCanvas: this.getFrameCanvas(),
+					});
+					if (index === 0) {
+						this.assertFrameNotBlank({
+							canvas: this.getFrameCanvas(),
+							what: "frame",
+						});
+					}
+					await videoSource.add(
+						mediaTimeToSeconds({ time: index * ticksPerFrame }),
+						1 / fpsFloat,
+					);
+					this.emit("progress", (index + 1) / frameCount);
 				}
-
-				const timeTicks = i * ticksPerFrame;
-				const timeSeconds = mediaTimeToSeconds({ time: timeTicks });
-				await this.renderer.renderToCanvas({
-					node: rootNode,
-					time: timeTicks,
-					targetCanvas: this.getFrameCanvas(),
-				});
-				if (i === 0) {
-					this.assertFrameNotBlank({ canvas: this.getFrameCanvas(), what: "frame" });
-				}
-				try {
-					await this.feedFrame();
-				} catch (error) {
-					// The only expected failure here is a user cancel landing
-					// mid-upscale; anything else is a real export error.
-					if (this.isCancelled) return this.abort(output);
-					throw error;
-				}
-				if (i === 0 && this.upscale) {
-					// The upscale path can blank the frame all by itself.
-					this.assertFrameNotBlank({ canvas: this.getFeedCanvas(), what: "upscaled frame" });
-				}
-				await videoSource.add(timeSeconds, 1 / fpsFloat);
-
-				this.emit("progress", i / frameCount);
+			} else {
+				await this.pipelinedExport({ rootNode, videoSource, frameCount, ticksPerFrame, fpsFloat });
 			}
 
 			if (this.isCancelled) {
